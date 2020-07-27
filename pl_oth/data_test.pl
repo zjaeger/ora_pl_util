@@ -1,42 +1,70 @@
 #!/usr/bin/perl
 # data_test.pl
 #
-# for selected tables generate records:
-# TAB_NAME;COL_NAME;DATA_TYPE;MAN;CNT;CNT_NULL;CNT_DISTINCT;UNIQUE;MIN;MAX
+# for selected tables: generate records (CSV format) to standard output:
+# OWNER;TAB_NAME;COL_NAME;DATA_TYPE;MAN;CNT;CNT_NULL;CNT_DISTINCT;UNIQUE;MIN;MAX
 
 use strict ;
 use warnings ;
 use integer ;
 use DBI ;
-
-require 'ora_connect.pl' ;
+use Ora_LDA ;
 
 # -- BEGIN --
 
 $ENV{"NLS_SORT"} = 'BINARY' ;
-unless( $ARGV[ 0 ] ) { die "No args (connect string expected).\n\n" }
+unless( $ARGV[ 0 ] ) { die "No args ( <connect_string> [ [owner.]table_name_LIKE_expr ] ... ).\n\n" }
 
-my $Lda = ora_connect( $ARGV[ 0 ] ) ;
+my $Lda = Ora_LDA::ora_LDA( $ARGV[ 0 ] ) ;
 
 if( $Lda )
   {
+   my $c_tabs ;
+   my ( $uname,      # current USERNAME
+        $arg,        # command line argument
+        $owner,      # table owner
+        $table_name, # table name
+        $rpc,        # row processed count
+        $ix ) ;
+
    alter_session() ;
-   #my $c_tabs = $Lda->prepare("select TABLE_NAME from USER_TABLES where TABLE_NAME like '%ADDRESS' order by 1") ;
-   my $c_tabs = $Lda->prepare("select TABLE_NAME from USER_TABLES WHERE TABLE_NAME like 'WDM_CITI_LDWH_H_SALES' order by 1") ;
-   my $table_name ;
+   $uname  = get_USERNAME() ;
+   $c_tabs = $Lda->prepare(
+'select TABLE_NAME from ALL_TABLES where OWNER = ? and TABLE_NAME like ? order by TABLE_NAME') ;
 
-   print 'TAB_NAME;COL_NAME;DATA_TYPE;MAN;CNT;CNT_NULL;CNT_DISTINCT;UNIQUE;MIN;MAX'."\n" ;
+   print 'OWNER;TAB_NAME;COL_NAME;DATA_TYPE;MAN;CNT;CNT_NULL;CNT_DISTINCT;UNIQUE;MIN;MAX'."\n" ;
 
-   $c_tabs->execute() ;
-   while( ( $table_name ) = $c_tabs->fetchrow_array() )
+   for( $ix = 1 ; $ix < scalar @ARGV ; ++$ix )
      {
-      table_test( $table_name ) ;
+      $rpc = 0 ;
+      $arg = $ARGV[ $ix ] ;
+      ( $owner, $table_name ) = get_tab_spec( $uname, $arg ) ;
+
+      $c_tabs->execute( $owner, $table_name ) ;
+      while( ( $table_name ) = $c_tabs->fetchrow_array() )
+        {
+         ++$rpc ; table_test( $owner, $table_name ) ;
+        }
+      if( $rpc == 0 ) { print STDERR 'Warning: '. $arg .' - invalid table name (or like expr.)'."\n" }
      }
 
    $Lda->disconnect() or warn "Disconnect: $DBI::errstr\n\n" ;
   }
 
 # -- END --
+
+sub get_USERNAME
+  {
+   my $uname ;
+   my $c_usr = $Lda->prepare('select USERNAME from USER_USERS') ;
+
+   $c_usr->execute() ;
+   ( $uname ) = $c_usr->fetchrow_array() ;
+   $c_usr->finish() ;
+
+   return $uname ;
+  }
+
 
 sub alter_session
   {
@@ -45,48 +73,67 @@ sub alter_session
   }
 
 
+sub get_tab_spec
+  {
+   my ( $uname, $arg ) = @_ ;
+   my ( $owner, $tab_name ) ;
+
+   if( index( $arg,'.') > 0 )
+     {
+      ( $owner, $tab_name ) = split(/\./, uc( $arg )) ;
+     }
+   else
+     {
+      $owner = $uname ; $tab_name = uc( $arg ) ;
+     }
+
+   return ( $owner, $tab_name ) ;
+  }
+
+
 sub get_ra_Tcols
   {
-   my ( $table_name ) = @_ ;
+   my ( $owner, $table_name ) = @_ ;
    my ( $col_name, $data_type, $mandatory ) ;
    my @Tcols ;
 
    my $c_col = $Lda->prepare("
-SELECT
-  A.column_name,
-  CASE
-    WHEN A.data_type = 'NUMBER'
-    THEN
-      CASE
-        WHEN A.data_precision IS NULL
-        THEN A.data_type
-        ELSE 
-          CASE
-            WHEN A.data_scale = 0
-            THEN A.data_type||'('||TO_CHAR( A.data_precision )||')'
-            ELSE A.data_type||'('||TO_CHAR( A.data_precision )||','||TO_CHAR( A.data_scale )||')'
-          END
-      END
-    WHEN A.data_type = 'CHAR'
-    THEN
-      CASE
-        WHEN A.data_length = 1
-        THEN A.data_type
-        ELSE A.data_type||'('||TO_CHAR( A.data_length )||')'
-      END
-    WHEN A.data_type LIKE 'VARCHAR%'
-    THEN A.data_type||'('||TO_CHAR( A.data_length )||')'
-    ELSE A.data_type
-  END AS data_type,
-  case when A.nullable = 'N' then 'Y' end as MAN
-FROM
-  user_tab_columns A
-WHERE
-  A.table_name = ?
-ORDER BY
-  A.column_id") ;
+select
+  a.COLUMN_NAME,
+  case
+    when a.DATA_TYPE = 'NUMBER'
+    then
+      case
+        when a.DATA_PRECISION is null
+        then a.DATA_TYPE
+        else 
+          case
+            when a.DATA_SCALE = 0
+            then a.DATA_TYPE||'('||to_char( a.DATA_PRECISION )||')'
+            else a.DATA_TYPE||'('||to_char( a.DATA_PRECISION )||','||to_char( a.DATA_SCALE )||')'
+          end
+      end
+    when a.DATA_TYPE = 'CHAR'
+    then
+      case
+        when a.DATA_LENGTH = 1
+        then a.DATA_TYPE
+        else a.DATA_TYPE||'('||to_char( a.DATA_LENGTH )||')'
+      end
+    when a.DATA_TYPE like 'VARCHAR%'
+    then a.DATA_TYPE||'('||to_char( a.DATA_LENGTH )||')'
+    else a.DATA_TYPE
+  end as DATA_TYPE,
+  case when a.NULLABLE = 'N' then 'Y' end as MAN
+from
+  ALL_TAB_COLUMNS a
+where
+      a.OWNER = ?
+  and a.TABLE_NAME = ?
+order by
+  a.COLUMN_ID") ;
 
-   $c_col->execute( $table_name ) ;
+   $c_col->execute( $owner, $table_name ) ;
    while( ( $col_name, $data_type, $mandatory ) = $c_col->fetchrow_array())
      {
       unless( $mandatory ) { $mandatory = ''}
@@ -99,7 +146,7 @@ ORDER BY
 
 sub get_sql1
   {
-   my ( $table_name, $ra_Tcols ) = @_ ;
+   my ( $owner, $table_name, $ra_Tcols ) = @_ ;
    my ( $ra_Col, $sql, $col_name, $pref ) ;
    my $ix = 0 ;
 
@@ -111,16 +158,27 @@ sub get_sql1
       $col_name = $ra_Col->[0] ;
       ++$ix ;
       $pref = 'C'. $ix .'_' ;
-      $sql .= ",\n".
-              '  count('. $col_name .') as '. $pref .'CA,'."\n".
-              '  count(distinct '. $col_name .') as '. $pref .'CD,'."\n".
-              '  min('. $col_name .') as '. $pref .'MI,'."\n".
-              '  max('. $col_name .') as '. $pref .'MA' ;
+      if( $ra_Col->[1] =~ /(LOB|LONG)/ )
+        {
+         $sql .= ",\n".
+                 '  -1   as '. $pref .'CA,'."\n".
+                 '  -1   as '. $pref .'CD,'."\n".
+                 '  NULL as '. $pref .'MI,'."\n".
+                 '  NULL as '. $pref .'MA' ;
+        }
+      else
+        {
+         $sql .= ",\n".
+                 '  count('. $col_name .') as '. $pref .'CA,'."\n".
+                 '  count(distinct '. $col_name .') as '. $pref .'CD,'."\n".
+                 '  min('. $col_name .') as '. $pref .'MI,'."\n".
+                 '  max('. $col_name .') as '. $pref .'MA' ;
+        }
      }
 
    $sql .= "\n".
            'from'."\n".
-           '  '. $table_name ;
+           '  '. lc( $owner ) .'.'. $table_name ;
 
    return $sql ;
   }
@@ -152,8 +210,8 @@ sub run_sql1
       ( $ca, $cd, $min, $max ) = ( $Val[ $iv ], $Val[ $iv+1 ], $Val[ $iv+2 ], $Val[ $iv+3 ] ) ;
       $iv += 4 ;
 
-      $cn = $cnt_all - $ca ;
-      $un = (($cnt_all - $cn) == $cd && $cd > 0 ) ? 'Y':'' ;
+      $cn = ($ca >= 0 ) ? ($cnt_all - $ca) : -1 ;
+      $un = ($ca >= 0 && ($cnt_all - $cn) == $cd && $cd > 0 ) ? 'Y':'' ;
       if( $cd == 1 ) { $max = '' }
 
       if( defined( $min ) )
@@ -179,25 +237,23 @@ sub run_sql1
 
 sub table_test
   {
-   my ( $table_name ) = @_ ;
+   my ( $owner, $table_name ) = @_ ;
    my ( $ra_Tcols, $ra_Col ) ;
    my ( $ra_Tva1,  $ra_Va1 ) ;
    my ( $sql, $col_cnt ) ;
    my $ix ;
 
-   $ra_Tcols = get_ra_Tcols( $table_name ) ;
+   $ra_Tcols = get_ra_Tcols( $owner, $table_name ) ;
    $col_cnt = @$ra_Tcols ; # -- count of columns
 
-=pod
-   foreach $ra_Col ( @$ra_Tcols )
-     {
-      print sprintf("%-30s", $ra_Col->[0] ) .' '.
-            sprintf("%-15s", $ra_Col->[1] ) .' '.
-            $ra_Col->[2] ."\n" ;
-     }
-=cut
+#  foreach $ra_Col ( @$ra_Tcols )
+#    {
+#     print sprintf("%-30s", $ra_Col->[0] ) .' '.
+#           sprintf("%-15s", $ra_Col->[1] ) .' '.
+#           $ra_Col->[2] ."\n" ;
+#    }
 
-   $sql = get_sql1( $table_name, $ra_Tcols ) ;
+   $sql = get_sql1( $owner, $table_name, $ra_Tcols ) ;
    $ra_Tva1 = run_sql1( $sql, $col_cnt ) ;
 
    for( $ix = 0 ; $ix < $col_cnt ; ++$ix )
@@ -205,7 +261,8 @@ sub table_test
       $ra_Col = $ra_Tcols->[ $ix ] ;
       $ra_Va1 = $ra_Tva1->[ $ix ] ;
 
-      print join(";", ( $table_name,
+      print join(";", ( $owner,
+                        $table_name,
                         $ra_Col->[ 0 ], # -- column name
                         $ra_Col->[ 1 ], # -- data type
                         $ra_Col->[ 2 ], # -- mandatory

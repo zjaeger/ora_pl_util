@@ -6,15 +6,14 @@ use strict ;
 use warnings ;
 use integer ;
 use DBI ;
-
-require 'ora_connect.pl' ;
+use Ora_LDA ;
 
 # -- BEGIN --
 
 $ENV{"NLS_SORT"} = 'BINARY' ;
 unless( $ARGV[ 0 ] ) { die "No args (connect string expected).\n\n" }
 
-my $Lda = ora_connect( $ARGV[ 0 ] ) ;
+my $Lda = Ora_LDA::ora_LDA( $ARGV[ 0 ] ) ;
 
 if( $Lda )
   {
@@ -43,16 +42,6 @@ sub alter_session
   }
 
 
-sub sysdate
-  {
-   my @cas   = localtime(time) ;
-   my $datum = sprintf "%02d.%02d.%4d %02d:%02d:%02d",
-                       $cas[3], $cas[4]+1, $cas[5]+1900,
-                       $cas[2], $cas[1], $cas[0] ;
-   return $datum ;
-  }
-
-
 sub sysdate_YYYYMMDD
   {
    my @cas   = localtime(time) ;
@@ -61,29 +50,12 @@ sub sysdate_YYYYMMDD
   }
 
 
-sub get_uid
-  {
-   my ( $uname, $db_name, $db_domain ) ;
-   my $c1 = $Lda->prepare("\
-SELECT username,
-       UPPER( SYS_CONTEXT('userenv','db_name')),
-       SYS_CONTEXT('userenv','db_domain')
-FROM   user_users") ;
-
-   $c1->execute() ;
-   ( $uname, $db_name, $db_domain ) = $c1->fetchrow_array() ;
-   $c1->finish() ;
-
-   return $uname .'@'. $db_name .'.'. $db_domain ;
-  }
-
-
 sub save_label
   {
    my ( $sysdate, $uid, $fname ) ;
 
-   $sysdate = sysdate() ;
-   $uid     = get_uid() ;
+   $sysdate = Ora_LDA::get_sysdate() ;
+   $uid     = Ora_LDA::get_uid( $Lda ) ;
 
    $fname = 'tab_to_csv.label' ;
 
