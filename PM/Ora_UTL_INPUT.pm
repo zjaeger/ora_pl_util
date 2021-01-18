@@ -174,7 +174,9 @@ sub process_param_file
          $row =~ s/^\s+// ;    # remove whitespaces at the beginning
          if( $row ne '' )
            {
-            ( $pn, $val ) = split(/\s*=\s*/, $row ) ;
+            # ( $pn, $val ) = split(/\s*=\s*/, $row ) ;
+            ( $pn, $val ) = $row =~ /^\s*(\w+)\s*=\s*(\S+.*)/ ;
+
             $pn = uc($pn) ;
             $val =~ s/\s+$// ; # remove whitespace at the end
             process_param_value( $pn, $val, $ra_params, $rh_p1, $rh_pst ) ;
