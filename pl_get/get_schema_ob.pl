@@ -1,9 +1,10 @@
-# get_schema_ob.pl 
+# get_schema_ob.pl
 #
 # extracts schema metadata (tables/views list and structure, PL/SQL code)
 # into text files
 #
 # 2020-11-30: redesign (+added PL/SQL functions, procedures, types)
+# 2022-07-07: option -all added
 
 use integer ;
 use strict ;
@@ -27,7 +28,7 @@ if( $Lda )
    my $subdir              = $db_name .'/'. $uname ;
    my $pref                = 'out' ;
 
-   $Lda->{LongReadLen} = 1024 * 32 ;
+   $Lda->{LongReadLen} = 1024 * 64 ;
 
    # create directories if doesn't exist
    if( ! -d $db_name ) { mkdir $db_name }
@@ -42,17 +43,43 @@ if( $Lda )
    upload_inl( $subdir, $pref, 4 ) ;
    upload_inc( $subdir, $pref, 5 ) ;
    # SQL (views):
-   upload_views( $subdir .'/sql') ;
+   if( $No_cmts_flg < 2 )
+     {
+      upload_views( $subdir .'/sql', $No_cmts_flg ) ;
+     }
+   else
+     {
+      upload_views( $subdir .'/sql',  0 ) ;
+      upload_views( $subdir .'/sql_', 1 ) ;
+     }
    # PL/SQL:
    my $c_obj = $Lda->prepare('select a.OBJECT_NAME from USER_OBJECTS a
 where a.OBJECT_TYPE = ? and regexp_like( a.OBJECT_NAME, ?)
 order by a.OBJECT_NAME') ;
    my $c_src = $Lda->prepare('select a.TEXT from USER_SOURCE a where a.TYPE = ? and a.NAME = ? order by a.LINE') ;
-   upload_pls( $c_obj, $c_src, $subdir .'/pls','PACKAGE') ;
-   upload_pls( $c_obj, $c_src, $subdir .'/fce','FUNCTION') ;
-   upload_pls( $c_obj, $c_src, $subdir .'/pro','PROCEDURE') ;
-   upload_pls( $c_obj, $c_src, $subdir .'/trg','TRIGGER') ;
-   upload_pls( $c_obj, $c_src, $subdir .'/typ','TYPE') ;
+
+   if( $No_cmts_flg < 2 )
+     {
+      upload_pls( $c_obj, $c_src, $subdir .'/pls', $No_cmts_flg,'PACKAGE') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/fce', $No_cmts_flg,'FUNCTION') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/pro', $No_cmts_flg,'PROCEDURE') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/trg', $No_cmts_flg,'TRIGGER') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/typ', $No_cmts_flg,'TYPE') ;
+     }
+   else
+     {
+      upload_pls( $c_obj, $c_src, $subdir .'/pls',  0,'PACKAGE') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/fce',  0,'FUNCTION') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/pro',  0,'PROCEDURE') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/trg',  0,'TRIGGER') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/typ',  0,'TYPE') ;
+
+      upload_pls( $c_obj, $c_src, $subdir .'/pls_', 1,'PACKAGE') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/fce_', 1,'FUNCTION') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/pro_', 1,'PROCEDURE') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/trg_', 1,'TRIGGER') ;
+      upload_pls( $c_obj, $c_src, $subdir .'/typ_', 1,'TYPE') ;
+     }
 
    $Lda->disconnect() or warn "Disconnect: $DBI::errstr\n\n" ;
   }
@@ -81,7 +108,10 @@ sub get_cmd_line_param
    if( $uid )
      {
       $lda = Ora_LDA::ora_LDA( $uid ) ;
-      $no_cmts_flg = ( substr( $opt, 0, 3 ) eq '-nc') ? 1 : 0 ;
+      if(    substr( $opt, 0, 3 ) eq '-nc' ) { $no_cmts_flg = 1 }
+      elsif( substr( $opt, 0, 4 ) eq '-all') { $no_cmts_flg = 2 }
+      else                                   { $no_cmts_flg = 0 }
+
       if( ! $rgn ) { $rgn = '.*' }
      }
    else
@@ -89,9 +119,10 @@ sub get_cmd_line_param
       print STDERR 'Utility for extract schema metadata (tables/views list and structure, PL/SQL code)'."\n".
                    'into text files (creates subdirectory for database name and for username)'."\n\n".
                    'Usage: get_schema_ob.pl <userid> [-cn] [<regexp_name>]'."\n".
-                   '  <userid>      : username/password@db_name'."\n".
-                   '  -nc           : no comments, views and PL/SQL code without code comments (optional)'."\n".
-                   '  <regexp_name> : regular expresion for OBJECT_NAME (optional)'."\n\n" ;
+                   '  <userid>        : username/password@db_name'."\n".
+                   '  [-nc]           : no comments, views and PL/SQL code without code comments (optional)'."\n".
+                   '  [-all]          : both - code with comments and code with no comments (optional)',"\n".
+                   '  [<regexp_name>] : regular expresion for OBJECT_NAME (optional)'."\n\n" ;
      }
 
    return( $lda, $no_cmts_flg, $rgn ) ;
@@ -109,7 +140,7 @@ sub get_filename_out
 sub save_label
   {
    my ( $subdir, $pref, $db_name, $uname, $no_cmts_flg, $re_name ) = @_ ;
-   my ( $sysdate, $uid, $fname, $exists_flg ) ;
+   my ( $sysdate, $uid, $fname, $exists_flg, $cmts_txt ) ;
 
    $sysdate = Ora_LDA::get_sysdate() ;
    $fname   = get_filename_out( $subdir, $pref, 0,'param','.txt') ;
@@ -118,9 +149,14 @@ sub save_label
 
    open( OUT, ">>$fname") || die "Can't open file ". $fname ."\n\n" ;
    if( $exists_flg ) { print OUT "\n" }
+
+   if(    $no_cmts_flg == 1 ) { $cmts_txt = 'code without comments' }
+   elsif( $no_cmts_flg >  1 ) { $cmts_txt = 'both (original source code and code without comments)' }
+   else                       { $cmts_txt = 'original source code' }
+
    print OUT 'schema:      '. lc( $uname ) .'@'. uc( $db_name ) ."\n".
              'date:        '. $sysdate ."\n".
-             'no_cmts_flg: '. (($no_cmts_flg) ? 'true (no comments)' : 'false (original source code)') ."\n" ;
+             'no_cmts_flg: '. $cmts_txt ."\n" ;
    if( $re_name )
      {
       print OUT 're_name:     '. $re_name .' (regular expression for OBJECT_NAME)'."\n" ;
@@ -133,11 +169,11 @@ sub save_label
 
 sub rows_out
   {
-   my ( $ra_rows, $fh, $obj_type ) = @_ ;
+   my ( $ra_rows, $fh, $obj_type, $no_cmts_flg ) = @_ ;
    my ( $line, $empty_line_flg ) ;
 
    $empty_line_flg = ($obj_type eq 'VIEW') ? 0 : 1 ;
-   if( $No_cmts_flg ) # output without comments
+   if( $no_cmts_flg ) # output without comments
      {
       my $code_flg = 1 ;         # TRUE  - enabled code (not commented)
       my $code_flg_change = 0 ;  # FALSE - change from enabled code to disabled code
@@ -195,7 +231,7 @@ sub rows_out
 
 sub upload_views
   {
-   my ( $subdir ) = @_ ;
+   my ( $subdir, $no_cmts_flg ) = @_ ;
    my ( $fh, $filename, $pathname ) ;
    my ( $c_vw, $view_name, $text ) ;
    my ( @Rows, $row, $first_flg ) ;
@@ -220,7 +256,7 @@ order by a.VIEW_NAME') ;
                 'prompt >>> create view '. $view_name ."\n\n".
                 'create or replace force view '. $view_name ."\nas\n" ;
       @Rows = split(/[\n]/, $text ) ;
-      rows_out( \@Rows, $fh,'VIEW') ;
+      rows_out( \@Rows, $fh,'VIEW', $no_cmts_flg ) ;
       @Rows = () ;
       close( $fh ) ;
      }
@@ -229,7 +265,7 @@ order by a.VIEW_NAME') ;
 
 sub upload_src
   {
-   my ( $c_src, $fh, $obj_type, $obj_name ) = @_ ;
+   my ( $c_src, $fh, $obj_type, $obj_name, $no_cmts_flg ) = @_ ;
    my ( $line, $len, @Rows ) ;
 
    $c_src->execute( $obj_type, $obj_name ) ;
@@ -251,7 +287,7 @@ sub upload_src
         {
          chomp( $line ) ; push( @Rows, $line ) ;
         }
-      rows_out( \@Rows, $fh, $obj_type ) ;
+      rows_out( \@Rows, $fh, $obj_type, $no_cmts_flg ) ;
       @Rows = () ;
      }
   }
@@ -259,7 +295,7 @@ sub upload_src
 
 sub upload_pls
   {
-   my ( $c_obj, $c_src, $subdir, $pls_type ) = @_ ;
+   my ( $c_obj, $c_src, $subdir, $no_cmts_flg, $pls_type ) = @_ ;
    my ( $fh, $filename, $pathname, $pls_name, $first_flg ) ;
 
    $first_flg = 1 ; # true
@@ -276,10 +312,10 @@ sub upload_pls
       print $pathname .' created.'."\n" ;
 
       print $fh '-- '. $filename ."\n" ;
-      upload_src( $c_src, $fh, $pls_type, $pls_name ) ;
+      upload_src( $c_src, $fh, $pls_type, $pls_name, $no_cmts_flg ) ;
       if( $pls_type eq 'PACKAGE')
         {
-         upload_src( $c_src, $fh,'PACKAGE BODY', $pls_name ) ;
+         upload_src( $c_src, $fh,'PACKAGE BODY', $pls_name, $no_cmts_flg ) ;
         }
       close( $fh ) ;
      }
@@ -442,3 +478,4 @@ order by
      }
    close( $fh ) ;
   }
+

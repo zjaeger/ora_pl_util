@@ -1,14 +1,18 @@
 #!/usr/bin/perl
+#
 # get_pkgs.pl
 #
 # SCHEMA PACKAGES UPLOAD (into text-files):
 #
 # USAGE: get_pkgs.pl <oracle_connect_string>
 # (oracle_connect_string: username/password@db_name)
+#
+# 2024-02-02 (last update)
 
 use strict ;
 use warnings ;
 use integer ;
+use File::Basename ;
 use DBI ;
 use Ora_LDA ;
 
@@ -16,47 +20,88 @@ use Ora_LDA ;
 
 $ENV{"NLS_SORT"} = 'BINARY' ;
 
-unless( $ARGV[ 0 ] ) { die "No args (connect string expected).\n\n" ; }
+my ( $Userid, $ra_Names ) = get_input_params( \@ARGV ) ;
+my $Lda ;
 
-my $Lda = Ora_LDA::ora_LDA( $ARGV[ 0 ] ) ;
+# break flag variable
+my $Sig_break = 0 ; $SIG{INT} = sub { $Sig_break = 1 } ;
 
-if( $Lda )
+# connect to Oracle DB
+if( $Lda = Ora_LDA::ora_LDA( $Userid ))
   {
-   save_label() ;
+   save_label('00_db_plsql.lst') ;
 
-   print 'LongReadLen: '. $Lda->{LongReadLen} ."\n" ;
-   $Lda->{LongReadLen} = 4096 ;
+   my $C_obj = $Lda->prepare( q{
+select a.OBJECT_NAME
+from   USER_OBJECTS a
+where  a.OBJECT_TYPE = ? and regexp_like( a.OBJECT_NAME, ?,'i')
+order by a.OBJECT_NAME
+} ) ;
 
-   my $C_obj = $Lda->prepare("\
-SELECT object_name
-FROM   user_objects
-WHERE  object_type = ?
-ORDER BY object_name") ;
+   my $C_src = $Lda->prepare( q{
+select rtrim( a.TEXT )
+from   USER_SOURCE a
+where  a.NAME = ? and a.TYPE = ?
+order by LINE
+} ) ;
 
-   my $C_src = $Lda->prepare("\
-SELECT RTRIM( text )
-FROM   user_source
-WHERE  name = ? AND type = ?
-ORDER BY line") ;
-
-   upload_pkg( $C_obj, $C_src ) ;
-   ## upload_trg( $C_obj, $C_src ) ;
+   for my $obj_name_RE ( @$ra_Names )
+     {
+      upload_pkg( $C_obj, $C_src, $obj_name_RE ) ;
+      upload_trg( $C_obj, $C_src, $obj_name_RE ) ;
+     }
 
    $Lda->disconnect() or warn "Disconnect: $DBI::errstr\n\n" ;
   }
 
 # -- END --
 
+sub get_input_params
+  {
+   my ( $ra_arg ) = @_ ;
+   my ( $userid, # Oracle connect string
+        @a_name  # view name regexp values
+      ) ;
+
+   @a_name = () ;
+   foreach my $val ( @$ra_arg )
+     {
+      if( $val =~ /^[\w]+\/[\S]+@[\w\.]+$/
+          || ( $val =~ /^\w+$/ && exists $ENV{ $val } ) )
+        {
+         if( ! defined( $userid )) { $userid = $val }
+         else
+           { print STDERR 'Unexpected value (userid): '. $val ."\n" }
+        }
+      else
+        { push( @a_name, $val ) }
+     }
+
+   if( scalar @a_name == 0 ) { push( @a_name,'.*') }
+
+   unless(    defined( $userid )
+           && scalar @a_name != 0 )
+     {
+      if( scalar @$ra_arg > 0 ) { print STDERR 'Invalid parameters'."\n" }
+      printf STDERR 'Usage: '. basename( $0 ) .' <userid> [<object_name_RE>] ...'."\n\n" ;
+      exit 1 ;
+     }
+
+   return ( $userid, \@a_name ) ;
+  }
+
+
 sub save_label
   {
-   my $sysdate = Ora_LDA::get_sysdate() ;
-   my $uid     = Ora_LDA::get_uid( $Lda ) ;
-   my $fname = '00_db_pkgs.lst' ;
-   my $out ;
+   my ( $fname ) = @_ ;
+   my ( $sysdate, $uid, $out ) ;
 
-   open( $out, '>'. $fname ) || die "Can't open file ". $fname ."\n\n" ;
+   $sysdate = Ora_LDA::get_sysdate() ;
+   $uid     = Ora_LDA::get_uid( $Lda ) ;
+
+   open( $out,'>', $fname ) || die 'Error on open('. $fname .'): '. $! ."\n\n" ;
    print $out 'Date:   '. $sysdate ."\n".
-             'Schema: '. $uid ."\n" ;
+              'Schema: '. $uid ."\n" ;
    close( $out ) ;
 
    print 'File '. $fname .' created.'."\n" ;
@@ -65,59 +110,65 @@ sub save_label
 
 sub upload_pkg
   {
-   my ( $c_obj, $c_src ) = @_ ;
-   my ( $pname, $fname ) ;
-   my ( $out, $text, $cnt ) ;
+   my ( $c_obj, $c_src, $obj_name_RE ) = @_ ;
+   my ( $pname, $fname, $out ) ;
+   my ( $text, $cnt ) ;
 
-   $c_obj->execute('PACKAGE') ;
+   $c_obj->execute('PACKAGE', $obj_name_RE ) ;
    while( ( $pname ) = $c_obj->fetchrow_array() )
      {
-      $fname = lc( $pname ) .'.pls' ;
+      $fname = lc( $pname ) .'.sql' ;
       open( $out,'>'. $fname ) or die "Can't open file ". $fname ."\n\n" ;
-      print $out '-- '. $fname ."\n\n" ;
+      print $out '-- '. $fname ."\n".
+                 '--'."\n".
+                 '-- rdbms: oracle'."\n\n" ;
 
-      print $out 'PROMPT Package '. uc( $pname ) ."\n\n" ;
+    # print $out 'prompt >>> create package '. uc( $pname ) ."\n\n" ;
 
-      print $out 'CREATE OR REPLACE ' ;
+      print $out 'create or replace ' ;
       $c_src->execute( $pname,'PACKAGE') ;
       while( ( $text ) = $c_src->fetchrow_array() ) { if( $text ) { print $out $text } }
 
       print $out "\n/\n\n" ;
+    # print $out 'prompt >>> create package body '. uc( $pname ) ."\n\n" ;
 
       $c_src->execute( $pname,'PACKAGE BODY') ;
       $cnt = 0 ;
       while( ( $text ) = $c_src->fetchrow_array() )
         {
-       # if( $c_src->rows == 1 ) { print $out 'CREATE OR REPLACE ' ; }
-         if( $cnt == 0 ) { print $out 'CREATE OR REPLACE ' ; }
+         if( $cnt == 0 ) { print $out 'create or replace ' ; }
          ++$cnt ;
          print $out $text ;
         }
-
-      if( $c_src->rows > 0 ) { print $out "\n/\nshow errors\n" ; }
+      if( $c_src->rows > 0 )
+        {
+         print $out "\n/\n" ;
+       # print $out "show errors\n" ;
+        }
 
       close( $out ) ;
       print 'File '. $fname .' created.'."\n" ;
+
+      if( $Sig_break != 0 ) { print 'BREAK'."\n" ; last ; }
      }
   }
 
 
 sub upload_trg
   {
-   my ( $c_obj, $c_src ) = @_ ;
-   my ( $pname, $fname ) ;
-   my ( $out, $text ) ;
+   my ( $c_obj, $c_src, $obj_name_RE ) = @_ ;
+   my ( $pname, $fname, $out, $text ) ;
 
-   $c_obj->execute('TRIGGER') ;
+   $c_obj->execute('TRIGGER', $obj_name_RE ) ;
    while( ( $pname ) = $c_obj->fetchrow_array() )
      {
-      $fname = 'tr_'. lc( $pname ) .'.pls' ;
+      $fname = 'tr_'. lc( $pname ) .'.sql' ;
       open( $out, '>'. $fname ) or die "Can't open file: ". $fname ."\n\n" ;
       print $out '-- '. $fname ."\n\n" ;
 
-      print $out 'PROMPT Trigger '. uc( $pname ) ."\n\n" ;
+    # print $out 'prompt >>> create trigger '. uc( $pname ) ."\n\n" ;
 
-      print $out 'CREATE OR REPLACE ' ;
+      print $out 'create or replace ' ;
       $c_src->execute( $pname,'TRIGGER') ;
       while( ( $text ) = $c_src->fetchrow_array() ) { print $out $text ; }
 
@@ -125,6 +176,8 @@ sub upload_trg
 
       close( $out ) ;
       print 'File '. $fname .' created.'."\n" ;
+
+      if( $Sig_break != 0 ) { print 'BREAK'."\n" ; last ; }
      }
   }
 

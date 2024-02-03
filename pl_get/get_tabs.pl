@@ -11,6 +11,8 @@
 # TODO:
 # - check constraints: remove empty rows
 # - triggers: problem with "end ;/"
+#
+# 2024-02-02 (last update)
 
 use strict ;
 use warnings ;
@@ -22,33 +24,35 @@ use Ora_LDA ;
 # -- BEGIN --
 
 $ENV{"NLS_SORT"} = 'BINARY' ;
+my ( $Userid, $ra_Names ) = get_input_params( \@ARGV ) ;
+my $Lda ;
 
-unless( $ARGV[ 0 ] ) { die "No args (connect string expected).\n\n" }
-
-my $Lda = Ora_LDA::ora_LDA( $ARGV[ 0 ] ) ;
-
-if( $Lda )
+# connect to Oracle DB
+if( $Lda = Ora_LDA::ora_LDA( $Userid ))
   {
-   save_label() ;
+   save_label('00_db_tabs.lst') ;
 
    # print 'LongReadLen: '. $Lda->{LongReadLen} ."\n" ;
    $Lda->{LongReadLen} = 4096 ;
 
-#  upload_table('DEBITS') ;
-#  upload_table('ACCOUNTS') ;
-#  upload_table('TRANSACTIONS') ;
-#  upload_table('PROJ_CONTRACTS') ;
-#  upload_table('TEMP_DEBITS') ;
-#  upload_table('DEBITS_MONTHLY_HISTORY') ;
-
    my $table_name ;
-   my $c_tabs = $Lda->prepare("\
-SELECT table_name FROM user_tables") ;
+   my $c_tabs = $Lda->prepare( q{
+select a.TABLE_NAME
+from
+  USER_TABLES a
+where
+  regexp_like( a.TABLE_NAME, ?,'i')
+order by
+  a.TABLE_NAME
+} ) ;
 
-   $c_tabs->execute() ;
-   while( ( $table_name ) = $c_tabs->fetchrow_array() )
+   for my $tab_name_RE ( @$ra_Names )
      {
-      upload_table( $table_name ) ;
+      $c_tabs->execute( $tab_name_RE ) ;
+      while( ( $table_name ) = $c_tabs->fetchrow_array() )
+        {
+         upload_table( $table_name ) ;
+        }
      }
 
    $Lda->disconnect() or warn "Disconnect: $DBI::errstr\n\n" ;
@@ -56,19 +60,53 @@ SELECT table_name FROM user_tables") ;
 
 # -- END --
 
+sub get_input_params
+  {
+   my ( $ra_arg ) = @_ ;
+   my ( $userid, # Oracle connect string
+        @a_name  # table name regexp values
+      ) ;
+
+   @a_name = () ;
+   foreach my $val ( @$ra_arg )
+     {
+      if( $val =~ /^[\w]+\/[\S]+@[\w\.]+$/
+          || ( $val =~ /^\w+$/ && exists $ENV{ $val } ) )
+        {
+         if( ! defined( $userid )) { $userid = $val }
+         else
+           { print STDERR 'Unexpected value (userid): '. $val ."\n" }
+        }
+      else
+        { push( @a_name, $val ) }
+     }
+
+   if( scalar @a_name == 0 )  { push( @a_name,'.*') }
+
+   unless(    defined( $userid )
+           && scalar @a_name != 0 )
+     {
+      if( scalar @$ra_arg > 0 ) { print STDERR 'Invalid parameters'."\n" }
+      printf STDERR 'Usage: '. basename( $0 ) .' <userid> [<table_name_RE>] ...'."\n\n" ;
+      exit 1 ;
+     }
+
+   return ( $userid, \@a_name ) ;
+  }
+
+
 sub save_label
   {
-   my ( $sysdate, $uid, $fname ) ;
+   my ( $fname ) = @_ ;
+   my ( $sysdate, $uid, $out ) ;
 
    $sysdate = Ora_LDA::get_sysdate() ;
    $uid     = Ora_LDA::get_uid( $Lda ) ;
 
-   $fname = '00_db_tabs.lst' ;
-
-   open( OUT, ">$fname") || die "Can't open file ". $fname ."\n\n" ;
-   print OUT 'Date:   '. $sysdate ."\n".
-             'Schema: '. $uid ."\n" ;
-   close( OUT ) ;
+   open( $out,'>', $fname ) || die 'Error on open('. $fname .'): '. $! ."\n\n" ;
+   print $out 'Date:   '. $sysdate ."\n".
+              'Schema: '. $uid ."\n" ;
+   close( $out ) ;
 
    print 'File '. $fname .' created.'."\n" ;
   }
@@ -79,19 +117,20 @@ sub print_pk_for_iot
    my ( $fh, $table_name ) = @_ ;
    my ( $con_name, $col_name, $col_pos ) ;
 
-   my $c_pk = $Lda->prepare("\
-SELECT
-  LOWER( A.constraint_name ),
-  LOWER( B.column_name ),
-  B.column_position
-FROM
-  user_constraints A
-  INNER JOIN user_ind_columns B ON ( A.constraint_name = B.index_name )
-WHERE
-  A.table_name = ?
-  AND A.constraint_type = 'P'
-ORDER BY
-  B.column_position") ;
+   my $c_pk = $Lda->prepare( q{
+select
+  lower( a.CONSTRAINT_NAME ),
+  lower( b.COLUMN_NAME ),
+  b.COLUMN_POSITION
+from
+  USER_CONSTRAINTS a
+  inner join USER_IND_COLUMNS b on ( a.CONSTRAINT_NAME = b.INDEX_NAME )
+where
+  a.TABLE_NAME = ?
+  and a.CONSTRAINT_TYPE = 'P'
+order by
+  b.COLUMN_POSITION
+} ) ;
 
    $c_pk->execute( $table_name ) ;
    while( ( $con_name, $col_name, $col_pos ) = $c_pk->fetchrow_array() )
@@ -114,11 +153,12 @@ sub print_partitions
    my ( $part_name, $val ) ;
    my $keywords ;
 
-   my $c_pa = $Lda->prepare("\
-SELECT partition_name, high_value
-FROM   user_tab_partitions
-WHERE  table_name = ?
-ORDER BY partition_position") ;
+   my $c_pa = $Lda->prepare( q{
+select a.PARTITION_NAME, a.HIGH_VALUE
+from   USER_TAB_PARTITIONS a
+where  a.TABLE_NAME = ?
+order by a.PARTITION_POSITION
+} ) ;
 
    if(    $part_type eq 'LIST' )  { $keywords = 'VALUES' }
    elsif( $part_type eq 'RANGE')  { $keywords = 'VALUES LESS THAN' }
@@ -145,21 +185,21 @@ sub print_partition_clause
    my ( $part_type, $subpart_type, $part_cnt, $col_name ) ;
    my $part_type0 ;
 
-   my $c_pt = $Lda->prepare("\
-SELECT
-  A.partitioning_type,
-  A.subpartitioning_type,
-  A.partition_count,
-  LOWER(B.column_name)
-FROM
-  user_part_tables A
-  INNER JOIN user_part_key_columns B
-    ON ( A.table_name = B.name
-         AND 'TABLE' = B.object_type )
-WHERE
-  A.table_name = ?
-ORDER BY
-  B.column_position") ;
+   my $c_pt = $Lda->prepare( q{
+select
+  a.PARTITIONING_TYPE,
+  a.SUBPARTITIONING_TYPE,
+  a.PARTITION_COUNT,
+  lower( b.COLUMN_NAME )
+from
+  USER_PART_TABLES a
+  inner join USER_PART_KEY_COLUMNS b on ( a.TABLE_NAME = b.NAME
+                                          and 'TABLE'  = b.OBJECT_TYPE )
+where
+  a.TABLE_NAME = ?
+order by
+  b.COLUMN_POSITION
+} ) ;
 
    $c_pt->execute( $table_name ) ;
    while( ( $part_type, $subpart_type, $part_cnt, $col_name ) = $c_pt->fetchrow_array() )
@@ -191,14 +231,15 @@ sub upload_table_1  # table specification
 # neuplne: nebere v potaz nekt.atributy (tablespace, cluster, ...)
    my ( $col_name, $data_type, $data_len, $data_prec, $data_sc, $data_def, $null ) ;
    my $dtype ;
-   my $c_col = $Lda->prepare("
-SELECT LOWER(column_name), data_type, data_length, data_precision, data_scale,
-       data_default, nullable
-FROM   user_tab_columns
-WHERE  table_name = ?
-ORDER BY column_id") ;
+   my $c_col = $Lda->prepare( q{
+select lower(a.COLUMN_NAME), a.DATA_TYPE, a.DATA_LENGTH, a.DATA_PRECISION, a.DATA_SCALE,
+       a.DATA_DEFAULT, a.NULLABLE
+from   USER_TAB_COLUMNS a
+where  a.TABLE_NAME = ?
+order by a.COLUMN_ID
+} ) ;
 
-   print $fh 'PROMPT Table '. $table_name ."\n\n" ;
+ # print $fh 'PROMPT Table '. $table_name ."\n\n" ;
 
    if( $is_temp ne 'Y' )
      { print $fh 'CREATE TABLE ' }
@@ -296,13 +337,14 @@ sub upload_table_2  # -- check constraints
    my ( $fh, $table_name ) = @_ ;
 
    my ( $con, $text ) ;
-   my $c_con = $Lda->prepare("\
-SELECT constraint_name, search_condition
-FROM   user_constraints
-WHERE  constraint_name NOT LIKE 'SYS%'
-       AND constraint_type = 'C'
-       AND table_name = ?
-ORDER BY constraint_name") ;
+   my $c_con = $Lda->prepare( q{
+select a.CONSTRAINT_NAME, a.SEARCH_CONDITION
+from   USER_CONSTRAINTS a
+where  a.CONSTRAINT_NAME not like 'SYS%'
+       and a.CONSTRAINT_TYPE = 'C'
+       and a.TABLE_NAME = ?
+order by a.CONSTRAINT_NAME
+} ) ;
 
    $c_con->execute( $table_name ) ;
 
@@ -323,11 +365,12 @@ sub upload_table_3  # -- table and column comments
    my ( $c_tc1, $c_tc2 ) ;
    my ( $type, $col_name, $text ) ;
 
-   $c_tc1 = $Lda->prepare("
-SELECT table_type, comments
-FROM   user_tab_comments
-WHERE  table_name = ?
-       AND comments IS NOT NULL") ;
+   $c_tc1 = $Lda->prepare( q{
+select a.TABLE_TYPE, a.COMMENTS
+from   USER_TAB_COMMENTS a
+where  a.TABLE_NAME = ?
+       and a.COMMENTS is not null
+} ) ;
 
    $c_tc1->execute( $table_name ) ;
    ( $type, $text ) = $c_tc1->fetchrow_array() ;
@@ -341,12 +384,13 @@ WHERE  table_name = ?
                 "/\n" ;
      }
 
-   $c_tc2 = $Lda->prepare("
-SELECT column_name, comments
-FROM   user_col_comments
-WHERE  table_name = ?
-       AND comments IS NOT NULL
-ORDER BY column_name") ;
+   $c_tc2 = $Lda->prepare( q{
+select a.COLUMN_NAME, a.COMMENTS
+from   USER_COL_COMMENTS a
+where  a.TABLE_NAME = ?
+       and a.COMMENTS is not null
+order by a.COLUMN_NAME
+} ) ;
 
    $c_tc2->execute( $table_name ) ;
    while( ( $col_name, $text ) = $c_tc2->fetchrow_array() )
@@ -371,25 +415,26 @@ sub upload_table
         $is_temp,     # temporary table (Y/N)
         $duration,    # for temp.table; values: 'SYS$SESSION','SYS$TRANSACTION'
         $cnt_i, $cnt_t ) ;
-   my $c_tab = $Lda->prepare("\
-SELECT
-  A.tablespace_name,
-  A.cluster_name,
-  DECODE( NVL( A.logging,'YES'),'YES','Y','N') AS logging,
-  DECODE( A.partitioned,'YES','Y','N')         AS partitioned,
-  DECODE( NVL( A.iot_type,'x'),'IOT','Y','N')  AS iot,
-  A.temporary,
-  A.duration,
-  ( SELECT COUNT( B.index_name )
-    FROM   user_indexes B
-    WHERE  B.table_name = A.table_name )       AS indexes,
-  ( SELECT COUNT( C.trigger_name ) 
-    FROM   user_triggers C
-    WHERE  C.table_name = A.table_name )       AS trgs
-FROM
-  user_tables A
-WHERE
-  A.table_name = ?") ;
+   my $c_tab = $Lda->prepare( q{
+select
+  a.TABLESPACE_NAME,
+  a.CLUSTER_NAME,
+  decode( nvl( a.LOGGING,'YES'),'YES','Y','N') as LOGGING,
+  decode( a.PARTITIONED,'YES','Y','N')         as PARTITIONED,
+  decode( nvl( a.IOT_TYPE,'-'),'IOT','Y','N')  as IOT,
+  a.TEMPORARY,
+  a.DURATION,
+  ( select count( b.INDEX_NAME )
+    from   USER_INDEXES b
+    where  b.TABLE_NAME = a.TABLE_NAME )       as INDEXES,
+  ( select count( c.TRIGGER_NAME )
+    from   USER_TRIGGERS c
+    where  c.TABLE_NAME = a.TABLE_NAME )       as TRGS
+from
+  USER_TABLES a
+where
+  a.TABLE_NAME = ?
+} ) ;
 
    $c_tab->execute( $table_name ) ;
    ( $tabsp_name, $clust_name, $is_log, $is_part, $is_iot, $is_temp, $duration,
@@ -402,9 +447,11 @@ WHERE
 
       $fname = lc( $table_name ) .'_TA.sql' ;
       $fh->open('>'. $fname ) ;
-      print $fh '-- '. $fname ."\n\n" ;
+      print $fh '-- '. $fname ."\n".
+                '--'."\n".
+                '-- rdbms: oracle'."\n\n" ;
 
-      # -- table specification 
+      # -- table specification
 
       if( $clust_name )
         {
@@ -452,29 +499,30 @@ sub upload_tab_indexes
         $ind_name, $ind_type, $uniq, $locality, $ctype, $col_name ) ;
    my ( $table_name2, $ind_name2, $ind_type2, $locality2, $ctype2, $col_names ) ;
    my $ind_option ;
-   my $fname ;
-   my $c_ind = $Lda->prepare("\
-SELECT
-  ROW_NUMBER() OVER (ORDER BY A.index_name, B.column_position )             AS ind_r,
-  ROW_NUMBER() OVER (PARTITION BY A.index_name ORDER BY B.column_position ) AS ind_c,
-  COUNT( B.column_position ) OVER (PARTITION BY A.index_name )              AS sum_c,
-  A.index_name,
-  A.index_type,
-  A.uniqueness,
-  DECODE( A.partitioned,'YES', D.locality ) AS locality,
-  C.constraint_type AS ctype,
-  B.column_name
-FROM
-  user_indexes A
-  INNER JOIN user_ind_columns B       ON ( A.index_name = B.index_name )
-  LEFT OUTER JOIN user_constraints C  ON ( A.index_name = C.constraint_name )
-  LEFT OUTER JOIN user_part_indexes D ON ( A.index_name = D.index_name )
-WHERE
-  A.table_name = ?
-  AND ('Y' != ? OR NVL( C.constraint_type,'X') != 'P') -- leaves out PK for index organized table
-ORDER BY
-  A.index_name,
-  B.column_position") ;
+   my ( $fname, $out ) ;
+   my $c_ind = $Lda->prepare( q{
+select
+  row_number() over (order by a.INDEX_NAME, b.COLUMN_POSITION )             as IND_R,
+  row_number() over (partition by a.INDEX_NAME order by b.COLUMN_POSITION ) as IND_C,
+  count( b.COLUMN_POSITION ) over (partition by a.INDEX_NAME )              as SUM_C,
+  a.INDEX_NAME,
+  a.INDEX_TYPE,
+  a.UNIQUENESS,
+  decode( a.PARTITIONED,'yes', d.LOCALITY ) as LOCALITY,
+  c.CONSTRAINT_TYPE as CTYPE,
+  b.COLUMN_NAME
+from
+  USER_INDEXES a
+  inner join USER_IND_COLUMNS b       on ( a.INDEX_NAME = b.INDEX_NAME )
+  left outer join USER_CONSTRAINTS c  on ( a.INDEX_NAME = c.CONSTRAINT_NAME )
+  left outer join USER_PART_INDEXES d on ( a.INDEX_NAME = d.INDEX_NAME )
+where
+  a.TABLE_NAME = ?
+  and ('Y' != ? or nvl( c.CONSTRAINT_TYPE,'-') != 'P') -- leaves out PK for index organized table
+order by
+  a.INDEX_NAME,
+  b.COLUMN_POSITION
+} ) ;
 
    $c_ind->execute( $table_name, $is_iot ) ;
 
@@ -485,10 +533,12 @@ ORDER BY
         {
          $table_name2 = lc( $table_name ) ;
          $fname = $table_name2 .'_IN.sql' ;
-         open( OUT,'>'. $fname ) or die "Can't open file ". $fname ."\n\n" ;
-         print OUT '-- '. $fname ."\n\n" ;
+         open( $out,'>', $fname ) || die 'Error on open('. $fname .'): '. $! ."\n\n" ;
+         print $out '-- '. $fname ."\n".
+                   '--'."\n".
+                   '-- rdbms: oracle'."\n" ;
 
-         print OUT 'PROMPT Indexes on table '. $table_name ."\n" ;
+       # print $out 'PROMPT Indexes on table '. $table_name ."\n" ;
         }
 
       if( $ind_c == 1 )  # the first row for the table index
@@ -531,10 +581,10 @@ ORDER BY
       if( $ind_c == $sum_c )  # the last row for the table index
         {
          if( $ctype2 )
-           { 
-            print OUT "\n".
-                      'ALTER TABLE '. $table_name2 .' ADD'."\n".
-                      'CONSTRAINT '. $ind_name2 .' '. $ctype2 .' ( '. $col_names .' )' ;
+           {
+            print $out "\n".
+                       'ALTER TABLE '. $table_name2 .' ADD'."\n".
+                       'CONSTRAINT '. $ind_name2 .' '. $ctype2 .' ( '. $col_names .' )' ;
            }
          else
            {
@@ -542,45 +592,43 @@ ORDER BY
             else
               { $ind_option = $ind_type2 .' ' }
 
-            print OUT "\n".
-                      'CREATE '. $ind_option .'INDEX '. $ind_name2 .' ON '.
-                      $table_name2 .' ( '. $col_names .' )' ;
+            print $out "\n".
+                       'CREATE '. $ind_option .'INDEX '. $ind_name2 .' ON '.
+                       $table_name2 .' ( '. $col_names .' )' ;
            }
 
          if( $ctype2 )
            {
             if( defined $locality2 && $locality2 eq 'LOCAL' )
               {
-               print OUT "\n".'USING INDEX LOCAL'.
-                         "\n".'TABLESPACE &TABSP_NAME' ;
+               print $out "\n".'USING INDEX LOCAL'.
+                          "\n".'TABLESPACE &TABSP_NAME' ;
               }
             else
               {
-               print OUT "\n".'USING INDEX'.
-                         "\n".'TABLESPACE &TABSP_NAME' ;
+               print $out "\n".'USING INDEX'.
+                          "\n".'TABLESPACE &TABSP_NAME' ;
               }
            }
-         else 
+         else
            {
             if( defined $locality2 && $locality2 eq 'LOCAL' )
               {
-               print OUT "\n".'LOCAL'.
-                         "\n".'TABLESPACE &TABSP_NAME'.
-                         "\n".'PARALLEL' ;
+               print $out "\n".'LOCAL'.
+                          "\n".'TABLESPACE &TABSP_NAME'.
+                          "\n".'PARALLEL' ;
               }
             else
-              {
-               print OUT "\n".'TABLESPACE &TABSP_NAME' ;
-              }
+              { print $out "\n".'TABLESPACE &TABSP_NAME' }
            }
 
-         print OUT "\n/\n" ;
+         print $out "\n/\n" ;
         }
      }
 
    if( $c_ind->rows > 0 )
      {
-      close( OUT ) ;
+      close( $out ) ;
       print 'File '. $fname .' created.'."\n" ;
      }
   }
@@ -590,51 +638,54 @@ sub upload_tab_triggers
   {
    my ( $table_name, $table_type ) = @_ ;
    my ( $trg_name, $row_no ) ;
-   my $fname ;
+   my ( $fname, $out ) ;
    my $text ;
 
-   my $c_trg = $Lda->prepare("\
-SELECT
-  trigger_name,
-  ROW_NUMBER() OVER (ORDER BY trigger_name )  AS row_no
-FROM
-  user_triggers
-WHERE
-  table_name = ?
-  AND base_object_type = ?
-ORDER BY
-  trigger_name") ;
+   my $c_trg = $Lda->prepare( q{
+select
+  a.TRIGGER_NAME,
+  row_number() over (order by a.TRIGGER_NAME ) as ROW_NO
+from
+  USER_TRIGGERS a
+where
+  a.TABLE_NAME = ?
+  and a.BASE_OBJECT_TYPE = ?
+order by
+  a.TRIGGER_NAME
+} ) ;
 
-   my $c_src = $Lda->prepare("\
-SELECT RTRIM( text ) FROM user_source WHERE name = ? AND type = ?
-ORDER BY line") ;
-  
+   my $c_src = $Lda->prepare( q{
+select rtrim( a.TEXT ) from USER_SOURCE a where a.NAME = ? and a.TYPE = ?
+order by a.LINE
+} ) ;
+
    $c_trg->execute( $table_name, $table_type ) ;
 
    while( ( $trg_name, $row_no ) = $c_trg->fetchrow_array() )
      {
       if( $row_no == 1 )
         {
-         $fname = lc( $table_name ) .'_TR.pls' ;
-         open( OUT, '>'. $fname ) or die "Can't open file: ". $fname ."\n\n" ;
-         print OUT '-- '. $fname ."\n\n" ;
+         $fname = lc( $table_name ) .'_TR.sql' ;
+         open( $out,'>', $fname ) || die 'Error on open('. $fname .'): '. $! ."\n\n" ;
+         print $out '-- '. $fname ."\n".
+                    '--'."\n".
+                    '-- rdbms: oracle'."\n" ;
         }
 
-      print OUT 'PROMPT Trigger '. uc( $trg_name ) ."\n\n" ;
+    # print $out 'PROMPT Trigger '. uc( $trg_name ) ."\n\n" ;
 
-      print OUT 'CREATE OR REPLACE ' ;
+      print $out 'CREATE OR REPLACE ' ;
       $c_src->execute( $trg_name,'TRIGGER') ;
-      while( ( $text ) = $c_src->fetchrow_array() ) { print OUT $text }
+      while( ( $text ) = $c_src->fetchrow_array() ) { print $out $text }
 
-      print OUT "/\n\n" ;
+      print $out "/\n\n" ;
      }
 
    if( $c_trg->rows > 0 )
      {
-      close( OUT ) ;
+      close( $out ) ;
       print 'File '. $fname .' created.'."\n" ;
      }
   }
 
 # --- End of get_tabs.pl
-

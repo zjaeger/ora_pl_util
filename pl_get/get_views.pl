@@ -1,69 +1,112 @@
 #!/usr/bin/perl
+#
 # get_views.pl
 #
 # SCHEMA VIEWS UPLOAD (into text-files):
 #
-# USAGE: get_views.pl <oracle_connect_string> [<view_name>]
+# USAGE: get_views.pl <oracle_connect_string> [ <view_name_REGEXP>|all ] ...
 # (oracle_connect_string: username/password@db_name)
+#
+# 2024-02-02 (last update)
 
 use strict ;
 use warnings ;
 use integer ;
+use File::Basename ;
 use DBI ;
-use FileHandle ;
 use Ora_LDA ;
 
 # -- BEGIN --
 
 $ENV{"NLS_SORT"} = 'BINARY' ;
 
-unless( $ARGV[ 0 ] ) { die "No args ( <connect_string> [ view_name ] ).\n\n" ; }
+my ( $Userid, $ra_Names ) = get_input_params( \@ARGV ) ;
+my $Lda ;
 
-my $Lda = Ora_LDA::ora_LDA( $ARGV[ 0 ] ) ;
+# break flag variable
+my $Sig_break = 0 ; $SIG{INT} = sub { $Sig_break = 1 } ;
 
-if( $Lda )
+# connect to Oracle DB
+if( $Lda = Ora_LDA::ora_LDA( $Userid ))
   {
-   $Lda->{LongReadLen} = 16384 ;
+   $Lda->{LongReadLen} = 16384*4 ;
+   eval
+     {
+      save_label('00_db_views.lst') ;
 
-   save_label() ;
+      for my $view_name_RE ( @$ra_Names ) { upload_views( $view_name_RE ) }
+     } ;
+   if( $@ ) { print STDERR $@ ."\n" }
 
-   upload_views( $ARGV[ 1 ] ) ;
-
+   # Oracle disconnect
    $Lda->disconnect() or warn "Disconnect: $DBI::errstr\n\n" ;
   }
 
 # -- END --
 
+sub get_input_params
+  {
+   my ( $ra_arg ) = @_ ;
+   my ( $userid, # Oracle connect string
+        @a_name  # view name regexp values
+      ) ;
+
+   @a_name = () ;
+   foreach my $val ( @$ra_arg )
+     {
+      if( $val =~ /^[\w]+\/[\S]+@[\w\.]+$/
+          || ( $val =~ /^\w+$/ && exists $ENV{ $val } ) )
+        {
+         if( ! defined( $userid )) { $userid = $val }
+         else
+           { print STDERR 'Unexpected value (userid): '. $val ."\n" }
+        }
+      else
+        { push( @a_name, $val ) }
+     }
+
+   if( scalar @a_name == 0 )  { push( @a_name,'.*') }
+
+   unless(    defined( $userid )
+           && scalar @a_name != 0 )
+     {
+      if( scalar @$ra_arg > 0 ) { print STDERR 'Invalid parameters'."\n" }
+      printf STDERR 'Usage: '. basename( $0 ) .' <userid> [<view_name_RE>] ...'."\n\n" ;
+      exit 1 ;
+     }
+
+   return ( $userid, \@a_name ) ;
+  }
+
+
 sub save_label
   {
-   my ( $sysdate, $uid, $fname ) ;
+   my ( $fname ) = @_ ;
+   my ( $sysdate, $uid, $out ) ;
 
    $sysdate = Ora_LDA::get_sysdate() ;
    $uid     = Ora_LDA::get_uid( $Lda ) ;
 
-   $fname = '00_db_views.lst' ;
-
-   open( OUT, ">$fname") || die "Can't open file ". $fname ."\n\n" ;
-   print OUT 'Date:   '. $sysdate ."\n".
-             'Schema: '. $uid ."\n" ;
-   close( OUT ) ;
+   open( $out,'>', $fname ) || die 'Error on open('. $fname .'): '. $! ."\n\n" ;
+   print $out 'Date:   '. $sysdate ."\n".
+              'Schema: '. $uid ."\n" ;
+   close( $out ) ;
 
    print 'File '. $fname .' created.'."\n" ;
   }
 
 
-sub upload_table_3  # -- table and column comments
+sub upload_tab_comments  # -- table and column comments
   {
-   my ( $fh, $table_name ) = @_ ;
+   my ( $out, $table_name ) = @_ ;
    my ( $c_tc1, $c_tc2 ) ;
    my ( $type, $col_name, $text ) ;
 
-   $c_tc1 = $Lda->prepare("
-SELECT table_type, comments
-FROM   user_tab_comments
-WHERE  table_name = ?
-       AND comments IS NOT NULL") ;
-
+   $c_tc1 = $Lda->prepare( q{
+select a.TABLE_TYPE, a.COMMENTS
+from   USER_TAB_COMMENTS a
+where  a.TABLE_NAME = ? and a.COMMENTS is not null
+} ) ;
    $c_tc1->execute( $table_name ) ;
    ( $type, $text ) = $c_tc1->fetchrow_array() ;
    $c_tc1->finish() ;
@@ -71,25 +114,24 @@ WHERE  table_name = ?
    if( $type )
      {
       $text =~ s/\'/\'\'/g ;
-      print $fh 'COMMENT ON '. $type .' '. $table_name .' IS'."\n".
-                "\'". $text ."\'"."\n".
-                "/\n" ;
+      print $out 'COMMENT ON '. $type .' '. $table_name .' IS'."\n".
+                 "\'". $text ."\'"."\n".
+                 "/\n" ;
      }
 
-   $c_tc2 = $Lda->prepare("
-SELECT column_name, comments
-FROM   user_col_comments
-WHERE  table_name = ?
-       AND comments IS NOT NULL
-ORDER BY column_name") ;
-
+   $c_tc2 = $Lda->prepare( q{
+select a.COLUMN_NAME, a.COMMENTS
+from   USER_COL_COMMENTS a
+where  a.TABLE_NAME = ? and a.COMMENTS is not null
+order by a.COLUMN_NAME
+} ) ;
    $c_tc2->execute( $table_name ) ;
    while( ( $col_name, $text ) = $c_tc2->fetchrow_array() )
      {
       $text =~ s/\'/\'\'/g ;
-      print $fh 'COMMENT ON COLUMN '. $table_name .'.'. $col_name .' IS'."\n".
-                "\'". $text ."\'"."\n".
-                "/\n" ;
+      print $out 'COMMENT ON COLUMN '. $table_name .'.'. $col_name .' IS'."\n".
+                 "\'". $text ."\'"."\n".
+                 "/\n" ;
      }
   }
 
@@ -97,26 +139,25 @@ ORDER BY column_name") ;
 sub upload_tab_triggers
   {
    my ( $table_name, $table_type ) = @_ ;
-   my ( $trg_name, $row_no ) ;
-   my $fname ;
-   my $text ;
+   my ( $trg_name, $row_no, $fname, $text, $out ) ;
 
-   my $c_trg = $Lda->prepare("\
-SELECT
-  trigger_name,
-  ROW_NUMBER() OVER (ORDER BY trigger_name )  AS row_no
-FROM
-  user_triggers
-WHERE
-  table_name = ?
-  AND base_object_type = ?
-ORDER BY
-  trigger_name") ;
+   my $c_trg = $Lda->prepare( q{
+select
+  a.TRIGGER_NAME,
+  row_number() over (order by a.TRIGGER_NAME ) as ROW_NO
+from
+  USER_TRIGGERS a
+where
+  a.TABLE_NAME = ?
+  and a.BASE_OBJECT_TYPE = ?
+order by
+  a.TRIGGER_NAME
+} ) ;
 
-   my $c_src = $Lda->prepare("\
-SELECT RTRIM( text ) FROM user_source WHERE name = ? AND type = ?
-ORDER BY line") ;
-  
+   my $c_src = $Lda->prepare( q{
+select rtrim( a.TEXT ) from USER_SOURCE a where a.NAME = ? and a.TYPE = ? order by a.LINE
+} ) ;
+
    $c_trg->execute( $table_name, $table_type ) ;
 
    while( ( $trg_name, $row_no ) = $c_trg->fetchrow_array() )
@@ -124,23 +165,22 @@ ORDER BY line") ;
       if( $row_no == 1 )
         {
          $fname = lc( $table_name ) .'_TR.pls' ;
-         open( OUT, '>'. $fname ) or die "Can't open file: ". $fname ."\n\n" ;
-         print OUT '-- '. $fname ."\n\n" ;
+         open( $out,'>'. $fname ) || die 'Error on open ('. $fname .'): '. $! ."\n\n" ;
+         print $out '-- '. $fname ."\n\n" ;
         }
 
-      print OUT 'PROMPT Trigger '. uc( $trg_name ) ."\n\n" ;
+    # print $out 'prompt >>> create trigger '. uc( $trg_name ) ."\n\n" ;
 
-      print OUT 'CREATE OR REPLACE ' ;
+      print $out 'CREATE OR REPLACE ' ;
       $c_src->execute( $trg_name,'TRIGGER') ;
-      while( ( $text ) = $c_src->fetchrow_array() ) { print OUT $text }
+      while( ( $text ) = $c_src->fetchrow_array() ) { print $out $text }
 
-      print OUT "/\n\n" ;
+      print $out "\n/\n" ;
      }
 
    if( $c_trg->rows > 0 )
      {
-      close( OUT ) ;
-      print 'File '. $fname .' created.'."\n" ;
+      close( $out ) ; print 'File '. $fname .' created.'."\n" ;
      }
   }
 
@@ -148,94 +188,59 @@ ORDER BY line") ;
 sub upload_views
   {
    my ( $view_name_IN ) = @_ ;
-   my ( $view_name, $text, $cnt_t, $col_name ) ;
-   my ( $fname, $fh, $sep ) ;
-   my ( $len, $line_no ) ;
-   my ( $row, @Rows ) ;
-   my $c_vtxt ;
+   my ( $view_name, $text, $cnt_t ) ;
+   my ( $fname, $out, $in, $row ) ;
 
-   if( defined( $view_name_IN ))
+   my $c_vie = $Lda->prepare( q{
+select
+  a.VIEW_NAME,
+  a.TEXT,
+  ( select count( b.TRIGGER_NAME )
+    from   USER_TRIGGERS b
+    where  b.TABLE_NAME = a.VIEW_NAME ) as CNT_T
+from
+  USER_VIEWS a
+where
+  regexp_like( a.VIEW_NAME, ?,'i')
+order by
+  a.VIEW_NAME
+} ) ;
+
+   $c_vie->execute( $view_name_IN ) ;
+
+   while( ( $view_name, $text, $cnt_t ) = $c_vie->fetchrow_array() )
      {
-      $text = "\n".'WHERE'."\n".
-                   '  A.view_name LIKE '."'". $view_name_IN ."'\n" ;
-     }
-   else
-     { $text = '' }
+      $fname = lc( $view_name ) .'.sql' ;
+      open( $out,'>'. $fname ) || die 'Error on open('. $fname .'): '. $! ."\n\n" ;
+      print $out '-- '. $fname ."\n".
+                 '--'."\n".
+                 '-- rdbms: oracle'."\n\n" ;
 
-   $c_vtxt = $Lda->prepare("\
-SELECT
-  A.view_name,
-  A.text,
-  ( SELECT COUNT( B.trigger_name ) 
-    FROM   user_triggers B
-    WHERE  B.table_name = A.view_name ) AS cnt_t
-FROM
-  user_views A". $text . "\
-ORDER BY
-  A.view_name") ;
+    # print $out 'prompt >>> create view '. uc( $view_name ) ."\n\n" ;
+      print $out 'CREATE OR REPLACE VIEW '. lc( $view_name ) ."\n".
+                 'AS' ;
 
-   my $c_vcol = $Lda->prepare("\
-SELECT LOWER( column_name )
-FROM   user_tab_columns
-WHERE  table_name = ?
-ORDER BY column_id") ;
-
-   $fh = new FileHandle ;
-   $c_vtxt->execute() ;
-
-   while( ( $view_name, $text, $cnt_t ) = $c_vtxt->fetchrow_array() )
-     {
-      $fname = lc( $view_name ) .'_VW.sql' ;
-      $fh->open('>'. $fname ) or die "Can't open file ". $fname ."\n\n" ;
-      print $fh '-- '. $fname ."\n\n" ;
-
-      print $fh 'PROMPT View '. uc( $view_name ) ."\n\n" ;
-
-      print $fh 'CREATE OR REPLACE FORCE VIEW '. uc( $view_name ) ."(\nAS" ;
-
-=pod
-      $c_vcol->execute( $view_name ) ;
-      $len = 0 ; $line_no = 1 ; $sep = '/*01*/ ' ;
-      while( ( $col_name ) = $c_vcol->fetchrow_array() )
+      open( $in,'<', \$text ) ;
+      while( defined( $row = <$in> ) )
         {
-         print $fh $sep . $col_name ;
-
-         $len += length( $col_name ) + 2 ;
-
-         if( $len < 50 )
-           { $sep = ', ' ; }
-         else
-           {
-            ++$line_no ; $len = 0 ;
-            if( $line_no & 0x01 )
-              { $sep = sprintf(",\n/*%02d*/ ", $line_no ) ; }
-            else
-              { $sep = ",\n".'       ' ; }
-           }
+         $row =~ s/[\s]+$// ; if( $row ) { print $out "\n". $row }
         }
-      print $fh ' )'."\n".'AS ' ;
-=cut
-
-      @Rows = split(/[\n]/, $text ) ;
-      foreach $row ( @Rows )
-        {
-         $row =~ s/[\s]+$// ;
-         if( length( $row ) > 0 ) { print $fh "\n". $row }
-        }
-      print $fh ";\n" ;
-      ## print $fh $text ."\n/\n" ;  ## problem s praznym radkem na konci (Ora11) a pod.
+      close( $in ) ;
+      print $out "\n".'/'."\n" ;
 
       # -- comments
+      upload_tab_comments( $out, $view_name ) ;
 
-      upload_table_3( $fh, $view_name ) ;
+      close( $out ) ; print 'File '. $fname .' created.'."\n" ;
 
       # -- triggers (into other file)
+      if( $cnt_t > 0 ) { upload_tab_triggers( $view_name,'VIEW') }
 
-      if( $cnt_t > 0 )  { upload_tab_triggers( $view_name,'VIEW') }
-
-      $fh->close() ;
-      print 'File '. $fname .' created.'."\n" ;
+      if( $Sig_break != 0 ) { print 'BREAK'."\n" ; $c_vie->finish() ; last ; }
      }
+
+   if( ! defined $fname )
+     { print 'Warning: no data found for view_name_REGEXP='. $view_name_IN ."\n" }
   }
 
 # --- End of get_views.pl
