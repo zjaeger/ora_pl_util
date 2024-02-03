@@ -17,7 +17,7 @@ use DBI ;
 sub ora_LDA
   {
    my ( $userid ) = @_ ;
-   my ( $usr, $pass, $sid, $lda ) ;
+   my $lda ;
 
    if( ! $userid )
      {
@@ -25,13 +25,7 @@ sub ora_LDA
       else { die 'Error: no connect string.'."\n\n" }
      }
 
-   ( $usr, $pass, $sid ) = $userid =~ m/([\w]+)\/([\S]+)@([\w\.]+)/ ;
-
-   if( ! defined $usr ) { die 'Error: invalid connect string: '. $userid .".\n\n" }
-
-   # printf "Oracle connect (%s/%s@%s) ...\n", $usr, $pass, $sid ;
-
-   $lda = DBI->connect("dbi:Oracle:$sid", $usr, $pass, {
+   $lda = DBI->connect('dbi:Oracle:', $userid,'', {
       AutoCommit => 0,
       RaiseError => 1
    } ) or die "Connect: $DBI::errstr\n" ;
@@ -43,18 +37,22 @@ sub ora_LDA
 sub get_uid
   {
    my ( $lda ) = @_ ;
-   my ( $uname, $db_name, $db_domain ) ;
-   my $crs = $lda->prepare("\
-select a.USERNAME,
-       upper( sys_context('USERENV','DB_NAME')),
-       sys_context('USERENV','DB_DOMAIN')
-from   USER_USERS a") ;
+   my ( $uname, $host, $db_name, $db_domain ) ;
+   my $crs = $lda->prepare( q{
+select
+  a.USERNAME,
+  sys_context('USERENV','SERVER_HOST')     as HOST,
+  upper( sys_context('USERENV','DB_NAME')) as DB_NAME,
+  sys_context('USERENV','DB_DOMAIN')       as DB_DOMAINN
+from
+  USER_USERS a
+} ) ;
 
    $crs->execute() ;
-   ( $uname, $db_name, $db_domain ) = $crs->fetchrow_array() ;
+   ( $uname, $host, $db_name, $db_domain ) = $crs->fetchrow_array() ;
    $crs->finish() ;
 
-   return $uname .'@'. $db_name . ((defined $db_domain ) ? '.'. $db_domain : '') ;
+   return $uname .'@//'. $host .'/'. $db_name . ((defined $db_domain ) ? '.'. $db_domain : '') ;
   }
 
 

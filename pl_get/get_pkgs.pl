@@ -66,8 +66,8 @@ sub get_input_params
    @a_name = () ;
    foreach my $val ( @$ra_arg )
      {
-      if( $val =~ /^[\w]+\/[\S]+@[\w\.]+$/
-          || ( $val =~ /^\w+$/ && exists $ENV{ $val } ) )
+      if( $val =~ /^[\w]+\/[\S]+@[\S]+$/ )
+      #   || ( $val =~ /^\w+$/ && exists $ENV{ $val } )
         {
          if( ! defined( $userid )) { $userid = $val }
          else
