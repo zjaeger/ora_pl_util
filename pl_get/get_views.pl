@@ -16,6 +16,8 @@ use File::Basename ;
 use DBI ;
 use Ora_LDA ;
 
+# use open ':encoding(UTF-8)'; # input/output default encoding will be UTF-8
+
 # -- BEGIN --
 
 $ENV{"NLS_SORT"} = 'BINARY' ;
