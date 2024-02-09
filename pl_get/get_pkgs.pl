@@ -7,7 +7,7 @@
 # USAGE: get_pkgs.pl <oracle_connect_string>
 # (oracle_connect_string: username/password@db_name)
 #
-# 2024-02-02 (last update)
+# 2024-02-09 (last update)
 
 use strict ;
 use warnings ;
@@ -97,7 +97,7 @@ sub save_label
    my ( $sysdate, $uid, $out ) ;
 
    $sysdate = Ora_LDA::get_sysdate() ;
-   $uid     = Ora_LDA::get_uid( $Lda ) ;
+   $uid     = Ora_LDA::get_uid_text( $Lda ) ;
 
    open( $out,'>', $fname ) || die 'Error on open('. $fname .'): '. $! ."\n\n" ;
    print $out 'Date:   '. $sysdate ."\n".

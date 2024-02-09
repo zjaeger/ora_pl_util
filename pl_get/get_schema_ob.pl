@@ -5,6 +5,7 @@
 #
 # 2020-11-30: redesign (+added PL/SQL functions, procedures, types)
 # 2022-07-07: option -all added
+# 2024-02-09: Ora_LDA::get_uid_hash()
 
 use integer ;
 use strict ;
@@ -23,12 +24,15 @@ my ( $Lda,         # Oracle session handle (logon data area)
 
 if( $Lda )
   {
-   my $uid                 = Ora_LDA::get_uid( $Lda ) ;
-   my ( $uname, $db_name ) = $uid =~ m/([\w]+)@([\w]+)/ ;
-   my $subdir              = $db_name .'/'. $uname ;
-   my $pref                = 'out' ;
+   my $pref = 'out' ;
+   my ( $rh_uid, $uname, $db_name, $subdir ) ;
 
    $Lda->{LongReadLen} = 1024 * 64 ;
+
+   $rh_uid  = Ora_LDA::get_uid_hash( $Lda ) ;
+   $uname   = $rh_uid->{'uname'} ;
+   $db_name = $rh_uid->{'db_name'} ;
+   $subdir  = $db_name .'/'. $uname ;
 
    # create directories if doesn't exist
    if( ! -d $db_name ) { mkdir $db_name }

@@ -2,7 +2,7 @@
 #
 # Oracle Logon Data Area (connection handle)
 #
-# 2024-02-02 (last update)
+# 2024-02-09 (last update)
 
 package Ora_LDA ;
 
@@ -34,10 +34,11 @@ sub ora_LDA
   }
 
 
-sub get_uid
+sub get_uid_hash
   {
    my ( $lda ) = @_ ;
    my ( $uname, $host, $db_name, $db_domain ) ;
+   my %h_uid ;
    my $crs = $lda->prepare( q{
 select
   a.USERNAME,
@@ -52,7 +53,27 @@ from
    ( $uname, $host, $db_name, $db_domain ) = $crs->fetchrow_array() ;
    $crs->finish() ;
 
-   return $uname .'@//'. $host .'/'. $db_name . ((defined $db_domain ) ? '.'. $db_domain : '') ;
+   $h_uid{'uname'}     = $uname ;
+   $h_uid{'host'}      = $host ;
+   $h_uid{'db_name'}   = $db_name ;
+   $h_uid{'db_domain'} = ((defined $db_domain ) ? $db_domain : '') ;
+
+   return \%h_uid ;
+  }
+
+
+sub get_uid_text
+  {
+   my ( $lda ) = @_ ;
+   my $rh_uid ;
+
+   $rh_uid = get_uid_hash( $lda ) ;
+
+   return $rh_uid->{'uname'} .'@//'.
+          $rh_uid->{'host'} .'/'.
+          $rh_uid->{'db_name'} .
+          (( length( $rh_uid->{'db_domain'} ) > 0 ) ? '.' : '').
+          $rh_uid->{'db_domain'} ;
   }
 
 

@@ -12,11 +12,12 @@
 # - check constraints: remove empty rows
 # - triggers: problem with "end ;/"
 #
-# 2024-02-02 (last update)
+# 2024-02-09 (last update)
 
 use strict ;
 use warnings ;
 use integer ;
+use File::Basename ;
 use DBI ;
 use FileHandle ;
 use Ora_LDA ;
@@ -101,7 +102,7 @@ sub save_label
    my ( $sysdate, $uid, $out ) ;
 
    $sysdate = Ora_LDA::get_sysdate() ;
-   $uid     = Ora_LDA::get_uid( $Lda ) ;
+   $uid     = Ora_LDA::get_uid_text( $Lda ) ;
 
    open( $out,'>', $fname ) || die 'Error on open('. $fname .'): '. $! ."\n\n" ;
    print $out 'Date:   '. $sysdate ."\n".
