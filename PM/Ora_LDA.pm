@@ -2,7 +2,7 @@
 #
 # Oracle Logon Data Area (connection handle)
 #
-# 2024-02-09 (last update)
+# 2024-02-13 (last update)
 
 package Ora_LDA ;
 
@@ -30,6 +30,8 @@ sub ora_LDA
       RaiseError => 1
    } ) or die "Connect: $DBI::errstr\n" ;
 
+   $lda->{FetchHashKeyName} = 'NAME_lc' ;
+
    return $lda ;
   }
 
@@ -37,28 +39,22 @@ sub ora_LDA
 sub get_uid_hash
   {
    my ( $lda ) = @_ ;
-   my ( $uname, $host, $db_name, $db_domain ) ;
-   my %h_uid ;
+   my $rh_uid ;
    my $crs = $lda->prepare( q{
 select
-  a.USERNAME,
+  a.USERNAME                               as UNAME,
   sys_context('USERENV','SERVER_HOST')     as HOST,
   upper( sys_context('USERENV','DB_NAME')) as DB_NAME,
-  sys_context('USERENV','DB_DOMAIN')       as DB_DOMAINN
+  sys_context('USERENV','DB_DOMAIN')       as DB_DOMAIN
 from
   USER_USERS a
 } ) ;
-
    $crs->execute() ;
-   ( $uname, $host, $db_name, $db_domain ) = $crs->fetchrow_array() ;
+   $rh_uid = $crs->fetchrow_hashref() ;
    $crs->finish() ;
+   if( ! defined( $rh_uid->{'db_domain'} )) { $rh_uid->{'db_domain'} = ''}
 
-   $h_uid{'uname'}     = $uname ;
-   $h_uid{'host'}      = $host ;
-   $h_uid{'db_name'}   = $db_name ;
-   $h_uid{'db_domain'} = ((defined $db_domain ) ? $db_domain : '') ;
-
-   return \%h_uid ;
+   return $rh_uid ;
   }
 
 
