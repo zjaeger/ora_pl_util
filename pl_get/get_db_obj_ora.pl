@@ -1,13 +1,13 @@
 #!/usr/bin/perl
 #
-# get_ora_ob.pl
+# get_db_obj_ora.pl
 #
 # SCHEMA OBJECTS UPLOAD (into text-files):
 #
-# USAGE: get_ora_ob.pl <oracle_connect_string> -tvp [ <object_name_REGEXP>|all ] ...
+# USAGE: get_db_obj_ora.pl <oracle_connect_string> -[<option>...] [ <object_name_REGEXP>|all ] ...
 # (oracle_connect_string: username/password@db_name)
 #
-# 2024-02-16 (last update)
+# 2024-02-17 (last update)
 
 use strict ;
 use warnings ;
@@ -19,30 +19,29 @@ use Ora_LDA ;
 use open ':encoding(UTF-8)'; # input/output default encoding will be UTF-8
 # no warnings 'utf8';
 
-# { <object_type> } => [ <subdir>, <file_postfix> ]
+# { <object_type> } => [ <subdir>, <file_postfix>, <file_description> ]
 my %h_obj_tp = (
-  'tab' => ['tab','OT.sql'], # table [ subdir, postfix ]
-  'ix'  => ['tab','OI.sql'], # index
-  'trt' => ['tab','OR.sql'], # table trigger
-  'trv' => ['vie','OR.sql'], # view triggers
-  'vie' => ['vie','OV.sql'], # view
-  'pro' => ['pro','OP.sql'], # procedure
-  'fce' => ['fce','OF.sql'], # function
-  'pl'  => ['pl', 'OL.sql']  # package
+  'tab' => ['tab','OT.sql','table'],
+  'ix'  => ['tab','OI.sql','table indexes'],
+  'trt' => ['tab','OR.sql','triggers'],
+  'trv' => ['vie','OR.sql','triggers'],
+  'vie' => ['vie','OV.sql','view'],
+  'pro' => ['pro','OP.sql','PL/SQL procedure'],
+  'fce' => ['fce','OF.sql','PL/SQL function'],
+  'pl'  => ['pl', 'OL.sql','PL/SQL package']
 ) ;
 
-my %h_spath ;
+my %h_spath ; # $spath "cache" (optimization only)
 
 # -- BEGIN --
 
 $ENV{"NLS_SORT"} = 'BINARY' ;
 
 my ( $Userid, $Flg_ta, $Flg_vw, $Flg_pl, $ra_Names ) = get_input_params( \@ARGV ) ;
-my $Obj_cnt = 0 ;
 my $Lda ;
 
 # break flag variable
-my $Sig_break = 0 ; $SIG{INT} = sub { $Sig_break = 1 } ;
+my $break_FLG = 0 ; $SIG{INT} = sub { $break_FLG = 1 } ;
 
 # connect to Oracle DB
 if( $Lda = Ora_LDA::ora_LDA( $Userid ))
@@ -50,15 +49,23 @@ if( $Lda = Ora_LDA::ora_LDA( $Userid ))
    $Lda->{LongReadLen} = 16384*4 ;
    eval
      {
+      my $obj_cnt ;
+
       save_label('00_get_ora_ob.lst') ;
 
-      if( $Flg_vw )
+      for my $obj_name_RE ( @$ra_Names )
         {
-         for my $view_name_RE ( @$ra_Names ) { $Obj_cnt += upload_views( $view_name_RE, $Flg_vw ) }
+         $obj_cnt = 0 ;
+         if( $Flg_vw ) { $obj_cnt += upload_views( $obj_name_RE, $Flg_vw ) }
+
+         if( $obj_cnt == 0 ) { print STDERR 'Warning: no data found for obj_name_RE = '. $obj_name_RE ."\n" }
+
+         if( $break_FLG != 0 ) { last ; }
         }
      } ;
    if( $@ ) { print STDERR $@ ."\n" }
-   if( $Obj_cnt == 0 ) { print STDERR 'Warning: no data found.'."\n" }
+
+   if( $break_FLG != 0 ) { print 'BREAK'."\n" }
 
    # Oracle disconnect
    $Lda->disconnect() or warn "Disconnect: $DBI::errstr\n\n" ;
@@ -70,9 +77,9 @@ sub get_input_params
   {
    my ( $ra_arg ) = @_ ;
    my ( $userid, # Oracle connect string
-        $flg_ta,
-        $flg_vw,
-        $flg_pl,
+        $flg_ta, # flag (0, 1, 2, 3): tables
+        $flg_vw, # flag (0, 1, 2, 3): views
+        $flg_pl, # flag (0, 1, 2, 3): stored code
         @a_name  # view name regexp values
       ) ;
    my @a_val ;
@@ -142,8 +149,8 @@ sub h_spath_check
 
    if( ! exists $h_spath{ $spath } )
      {
-      if( ! -d $spath ) { mkdir $spath }
       $h_spath{ $spath } = 1 ;
+      if( ! -d $spath ) { mkdir $spath }
      }
   }
 
@@ -151,18 +158,20 @@ sub h_spath_check
 sub get_pathname
   {
    my ( $obj_tp, $obj_name, $flg_spath ) = @_ ;
-   my ( $subdir, $postfix ) ;
+   my ( $subdir, $postfix, $descr ) ;
    my ( $spath, $pref ) ;
    my ( $filename, $pathname ) ;
 
    if( ! exists $h_obj_tp{ $obj_tp } )
      {
       $pathname = $filename = lc( $obj_name ) .'.sql' ;
+      $descr = '?' ;
+      $postfix = '' ;
       print STDERR 'Warning: '. $obj_tp .' - invalid object type.'."\n" ;
      }
    else
      {
-      ( $subdir, $postfix ) = @{$h_obj_tp{ $obj_tp }} ;
+      ( $subdir, $postfix, $descr ) = @{$h_obj_tp{ $obj_tp }} ;
 
       if( $flg_spath > 0 )
         {
@@ -186,7 +195,21 @@ sub get_pathname
       $pathname = $spath . $filename ;
      }
 
-   return ( $pathname, $filename ) ;
+   return ( $pathname, $filename, $postfix, $descr ) ;
+  }
+
+
+sub out_print_head
+  {
+   my ( $out, $filename, $file_postfix, $file_desc ) = @_ ;
+   my $postfix ;
+
+   $postfix = substr( $file_postfix, 0, index( $file_postfix,'.')) ;
+
+   print $out '-- '. $filename ."\n".
+              '--'."\n".
+              '-- '. (( $postfix ) ? $postfix .': Oracle '. $file_desc
+                                   : 'rdbms: oracle') ."\n\n" ;
   }
 
 
@@ -234,7 +257,7 @@ sub upload_tab_triggers
   {
    my ( $obj_type, $table_name, $flg_spath ) = @_ ;
    my ( $trg_name, $row_no, $text, $out ) ;
-   my ( $pathname, $filename ) ;
+   my ( $pathname, $filename, $file_postfix, $file_desc ) ;
 
    my $c_trg = $Lda->prepare( q{
 select
@@ -261,10 +284,10 @@ select rtrim( a.TEXT ) from USER_SOURCE a where a.NAME = ? and a.TYPE = ? order 
      {
       if( $row_no == 1 )
         {
-         ( $pathname, $filename ) = get_pathname( $obj_type, $table_name, $flg_spath ) ;
+         ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname( $obj_type, $table_name, $flg_spath ) ;
 
          open( $out,'>'. $pathname ) || die 'Error on open ('. $pathname .'): '. $! ."\n\n" ;
-         print $out '-- '. $filename ."\n\n" ;
+         out_print_head( $out, $filename, $file_postfix, $file_desc ) ;
         }
 
     # print $out 'prompt >>> create trigger '. uc( $trg_name ) ."\n\n" ;
@@ -283,57 +306,89 @@ select rtrim( a.TEXT ) from USER_SOURCE a where a.NAME = ? and a.TYPE = ? order 
   }
 
 
+sub out_text
+  {
+   my ( $out, $text ) = @_ ;
+   my @a_rows = split(/\n/, $text ) ;
+
+   foreach my $row (@a_rows)
+     {
+      $row =~ s/[\s]+$// ; if( $row ) { print $out "\n". $row }
+     }
+  }
+
+
+sub out_text_2
+  {
+   my ( $out, $text, $view_name ) = @_ ;
+   my ( $in, $row ) ;
+
+   ## Sometimes failed:
+   ##   Strings with code points over 0xFF may not be mapped into in-memory file handles
+   ##   Error: open( text for view <view_name>) failed: Invalid argument
+   if( open( $in,'<', \$text ) )
+     {
+      while( defined( $row = <$in> ) )
+        {
+         $row =~ s/[\s]+$// ; if( $row ) { print $out "\n". $row }
+        }
+      close( $in ) ;
+     }
+   else
+     { print STDERR 'Error: open(text for view '. $view_name .') failed: '. $! ."\n" }
+  }
+
+
 sub upload_views
   {
    my ( $view_name_IN, $flg_spath ) = @_ ;
-   my $cnt = 0 ;
-   my ( $view_name, $text, $cnt_t ) ;
-   my ( $out, @a_rows ) ;
-   my ( $pathname, $filename ) ;
+   my $out_cnt = 0 ;
+   my ( $view_name, $trigger_flg, $text ) ;
+   my ( $pathname, $filename, $file_postfix, $file_desc ) ;
+   my $out ;
 
    my $c_vie = $Lda->prepare( q{
+with
+X_VIEWS
+as
+  ( select a.VIEW_NAME, a.TEXT
+    from   USER_VIEWS a
+    where  regexp_like( a.VIEW_NAME, ?,'i')
+  ),
+X_VIEWS_WITH_TRIGGER
+as
+  ( select distinct b.VIEW_NAME
+    from
+      X_VIEWS b
+      inner join USER_TRIGGERS c on ( b.VIEW_NAME = c.TABLE_NAME )
+  )
 select
-  a.VIEW_NAME,
-  a.TEXT,
-  ( select count( b.TRIGGER_NAME )
-    from   USER_TRIGGERS b
-    where  b.TABLE_NAME = a.VIEW_NAME ) as CNT_T
+  d.VIEW_NAME,
+  case when e.VIEW_NAME is not null then 'Y' end as TRIGGER_FLG,
+  d.TEXT
 from
-  USER_VIEWS a
-where
-  regexp_like( a.VIEW_NAME, ?,'i')
+  X_VIEWS d
+  left outer join X_VIEWS_WITH_TRIGGER e on ( d.VIEW_NAME = e.VIEW_NAME )
 order by
-  a.VIEW_NAME
+  d.VIEW_NAME
 } ) ;
 
    $c_vie->execute( $view_name_IN ) ;
 
-   while( ( $view_name, $text, $cnt_t ) = $c_vie->fetchrow_array() )
+   while( ( $view_name, $trigger_flg, $text ) = $c_vie->fetchrow_array() )
      {
-      $cnt++ ;
-      ( $pathname, $filename ) = get_pathname('vie', $view_name, $flg_spath ) ;
+      $out_cnt++ ;
+      if( $break_FLG != 0 ) { $c_vie->finish() ; last ; }
+
+      ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname('vie', $view_name, $flg_spath ) ;
 
       open( $out,'>'. $pathname ) || die 'Error on open('. $pathname .'): '. $! ."\n\n" ;
-      print $out '-- '. $filename ."\n".
-                 '--'."\n".
-                 '-- rdbms: oracle'."\n\n" ;
+      out_print_head( $out, $filename, $file_postfix, $file_desc ) ;
 
-    # print $out 'prompt >>> create view '. uc( $view_name ) ."\n\n" ;
       print $out 'CREATE OR REPLACE VIEW '. lc( $view_name ) ."\n".
                  'AS' ;
-
-      @a_rows = split(/\n/, $text ) ;
-      foreach my $row (@a_rows)
-        {
-         $row =~ s/[\s]+$// ; if( $row ) { print $out "\n". $row }
-        }
-
-    # open( $in,'<', \$text ) ; ## sometimes failed with error: invalid argument
-    # while( defined( $row = <$in> ) )
-    #   {
-    #    $row =~ s/[\s]+$// ; if( $row ) { print $out "\n". $row }
-    #   }
-    # close( $in ) ;
+      out_text( $out, $text ) ;
+      # out_text_2( $out, $text, $view_name ) ;
       print $out "\n;\n" ;
 
       # -- comments
@@ -342,12 +397,10 @@ order by
       close( $out ) ; print 'File '. $pathname .' created.'."\n" ;
 
       # -- triggers (into other file)
-      if( $cnt_t > 0 ) { upload_tab_triggers('trv', $view_name, $flg_spath ) }
-
-      if( $Sig_break != 0 ) { print 'BREAK'."\n" ; $c_vie->finish() ; last ; }
+      if( $trigger_flg ) { upload_tab_triggers('trv', $view_name, $flg_spath ) }
      }
 
-   return $cnt ;
+   return $out_cnt ;
   }
 
-# --- End of get_ora_ob.pl
+# --- End of get_db_obj_ora.pl
