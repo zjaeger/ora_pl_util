@@ -57,6 +57,7 @@ if( $Lda = Ora_LDA::ora_LDA( $Userid ))
         {
          $obj_cnt = 0 ;
          if( $Flg_vw ) { $obj_cnt += upload_views( $obj_name_RE, $Flg_vw ) }
+         if( $Flg_pl ) { $obj_cnt += upload_plsql( $obj_name_RE, $Flg_pl ) }
 
          if( $obj_cnt == 0 ) { print STDERR 'Warning: no data found for obj_name_RE = '. $obj_name_RE ."\n" }
 
@@ -273,7 +274,7 @@ order by
 } ) ;
 
    my $c_src = $Lda->prepare( q{
-select rtrim( a.TEXT ) from USER_SOURCE a where a.NAME = ? and a.TYPE = ? order by a.LINE
+select a.TEXT from USER_SOURCE a where a.NAME = ? and a.TYPE = ? order by a.LINE
 } ) ;
 
    # obj_type = trt - trigger on table
@@ -294,9 +295,11 @@ select rtrim( a.TEXT ) from USER_SOURCE a where a.NAME = ? and a.TYPE = ? order 
 
       print $out 'CREATE OR REPLACE ' ;
       $c_src->execute( $trg_name,'TRIGGER') ;
-      while( ( $text ) = $c_src->fetchrow_array() ) { print $out $text }
-
-      print $out "\n/\n" ;
+      while( ( $text ) = $c_src->fetchrow_array() )
+        {
+         $text =~ s/\s+$// ; print $out $text ."\n" ;
+        }
+      print $out "/\n" ;
      }
 
    if( $c_trg->rows > 0 )
@@ -398,6 +401,78 @@ order by
 
       # -- triggers (into other file)
       if( $trigger_flg ) { upload_tab_triggers('trv', $view_name, $flg_spath ) }
+     }
+
+   return $out_cnt ;
+  }
+
+
+sub upload_plsql
+  {
+   my ( $obj_name_IN, $flg_spath ) = @_ ;
+   my $out_cnt = 0 ;
+   my ( $ora_obj_tp, $obj_tp, $obj_name ) ;
+   my ( $pathname, $filename, $file_postfix, $file_desc ) ;
+   my ( $out, $text, $pb_cnt ) ;
+
+   my $c_pls = $Lda->prepare( q{
+select
+  a.OBJECT_TYPE,
+  case a.OBJECT_TYPE
+    when 'FUNCTION'  then 'fce'
+    when 'PROCEDURE' then 'pro'
+    when 'PACKAGE'   then 'pl'
+                     else '?'
+  end as OBJ_TYPE,
+  a.OBJECT_NAME
+from
+  USER_OBJECTS a
+where
+  a.OBJECT_TYPE in ('FUNCTION','PROCEDURE','PACKAGE')
+  and regexp_like( a.OBJECT_NAME, ?,'i')
+order by
+  a.OBJECT_TYPE,
+  a.OBJECT_NAME
+} ) ;
+
+   my $c_src = $Lda->prepare( q{
+select a.TEXT from USER_SOURCE a where a.NAME = ? and a.TYPE = ? order by a.LINE
+} ) ;
+
+   $c_pls->execute( $obj_name_IN ) ;
+   while( ( $ora_obj_tp, $obj_tp, $obj_name ) = $c_pls->fetchrow_array() )
+     {
+      $out_cnt++ ;
+      if( $break_FLG != 0 ) { $c_pls->finish() ; last ; }
+
+      ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname( $obj_tp, $obj_name, $flg_spath ) ;
+
+      open( $out,'>'. $pathname ) || die 'Error on open('. $pathname .'): '. $! ."\n\n" ;
+      out_print_head( $out, $filename, $file_postfix, $file_desc ) ;
+
+      print $out 'CREATE OR REPLACE ' ;
+      $c_src->execute( $obj_name, $ora_obj_tp ) ;
+      while( ( $text ) = $c_src->fetchrow_array() )
+        {
+         $text =~ s/\s+$// ; print $out $text ."\n" ;
+        }
+      print $out "/\n" ;
+
+      if( $obj_tp eq 'pl')
+        {
+         $pb_cnt = 0 ;
+         $c_src->execute( $obj_name,'PACKAGE BODY') ;
+
+         while( ( $text ) = $c_src->fetchrow_array() )
+           {
+            if( $pb_cnt == 0 ) { print $out "\n".'CREATE OR REPLACE '}
+            $pb_cnt++ ;
+            $text =~ s/\s+$// ; print $out $text ."\n" ;
+           }
+         if( $pb_cnt > 0 ) { print $out "/\n" }
+        }
+
+      close( $out ) ; print 'File '. $pathname .' created.'."\n" ;
      }
 
    return $out_cnt ;
