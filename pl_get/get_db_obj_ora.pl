@@ -7,7 +7,7 @@
 # USAGE: get_db_obj_ora.pl <oracle_connect_string> -[<option>...] [ <object_name_REGEXP>|all ] ...
 # (oracle_connect_string: username/password@db_name)
 #
-# 2024-02-17 (last update)
+# 2024-02-27 (last update)
 
 use strict ;
 use warnings ;
@@ -21,14 +21,14 @@ use open ':encoding(UTF-8)'; # input/output default encoding will be UTF-8
 
 # { <object_type> } => [ <subdir>, <file_postfix>, <file_description> ]
 my %h_obj_tp = (
-  'tab' => ['tab','OT.sql','table'],
-  'ix'  => ['tab','OI.sql','table indexes'],
-  'trt' => ['tab','OR.sql','triggers'],
-  'trv' => ['vie','OR.sql','triggers'],
-  'vie' => ['vie','OV.sql','view'],
-  'pro' => ['pro','OP.sql','PL/SQL procedure'],
-  'fce' => ['fce','OF.sql','PL/SQL function'],
-  'pl'  => ['pl', 'OL.sql','PL/SQL package']
+  'tab' => ['tab','O1T.sql','table'],
+  'ix'  => ['tab','O1I.sql','table indexes'],
+  'trt' => ['tab','O1R.sql','triggers'],
+  'trv' => ['vie','O1R.sql','triggers'],
+  'vie' => ['vie','O1V.sql','view'],
+  'pro' => ['pro','O1P.sql','PL/SQL procedure'],
+  'fce' => ['fce','O1F.sql','PL/SQL function'],
+  'pl'  => ['pl', 'O1L.sql','PL/SQL package']
 ) ;
 
 my %h_spath ; # $spath "cache" (optimization only)
@@ -56,8 +56,9 @@ if( $Lda = Ora_LDA::ora_LDA( $Userid ))
       for my $obj_name_RE ( @$ra_Names )
         {
          $obj_cnt = 0 ;
-         if( $Flg_vw ) { $obj_cnt += upload_views( $obj_name_RE, $Flg_vw ) }
-         if( $Flg_pl ) { $obj_cnt += upload_plsql( $obj_name_RE, $Flg_pl ) }
+         if( $Flg_ta ) { $obj_cnt += upload_tables( $obj_name_RE, $Flg_ta ) }
+         if( $Flg_vw ) { $obj_cnt += upload_views(  $obj_name_RE, $Flg_vw ) }
+         if( $Flg_pl ) { $obj_cnt += upload_plsql(  $obj_name_RE, $Flg_pl ) }
 
          if( $obj_cnt == 0 ) { print STDERR 'Warning: no data found for obj_name_RE = '. $obj_name_RE ."\n" }
 
@@ -477,5 +478,396 @@ select a.TEXT from USER_SOURCE a where a.NAME = ? and a.TYPE = ? order by a.LINE
 
    return $out_cnt ;
   }
+
+
+sub upload_tab_cols  # table specification
+  {
+   my ( $out, $table_name, $tabsp_name, $clust_name, $is_log, $is_part, $is_iot,
+        $is_temp, $duration ) = @_ ;
+# neuplne: nebere v potaz nekt.atributy (tablespace, cluster, ...)
+   my ( $col_name, $data_type, $data_len, $data_prec, $data_sc, $data_def, $null ) ;
+   my $dtype ;
+   my $c_col = $Lda->prepare( q{
+select lower(a.COLUMN_NAME), a.DATA_TYPE, a.DATA_LENGTH, a.DATA_PRECISION, a.DATA_SCALE,
+       a.DATA_DEFAULT, a.NULLABLE
+from   USER_TAB_COLUMNS a
+where  a.TABLE_NAME = ?
+order by a.COLUMN_ID
+} ) ;
+
+ # print $out 'PROMPT Table '. $table_name ."\n\n" ;
+
+   if( $is_temp ne 'Y' )
+     { print $out 'CREATE TABLE ' }
+   else
+     { print $out 'CREATE GLOBAL TEMPORARY TABLE ' }
+
+   print $out lc( $table_name ) ."(" ;
+
+# -- table columns
+
+   $c_col->execute( $table_name ) ;
+
+   while( ( $col_name, $data_type, $data_len, $data_prec, $data_sc,
+            $data_def, $null ) = $c_col->fetchrow_array() )
+     {
+      if( $data_type eq 'NUMBER' )
+        {
+         if( $data_prec )
+           {
+            if( $data_sc == 0 )
+              { $dtype = $data_type .'('. $data_prec .')' }
+                else
+              { $dtype = $data_type .'('. $data_prec .','. $data_sc .')' }
+           }
+         else
+           { $dtype = $data_type }
+# ----------------------- specialita pro DD: start ---------------------
+#          {
+#           unless( $col_name =~ /_id$/ )
+#             { $dtype = $data_type ; }
+#           else
+#             { $dtype = $data_type .'(12)' }
+#          }
+# ----------------------- specialita pro DD: konec ---------------------
+        }
+      elsif ( $data_type =~ /CHAR/ )
+        { $dtype = $data_type .'('. $data_len .')' }
+      else
+        { $dtype = $data_type }
+
+      if( $c_col->rows > 1 )
+        { printf $out ",\n  %-30s  %-20s", $col_name, $dtype }
+      else
+        { printf $out "\n  %-30s  %-20s", $col_name, $dtype }
+
+      if( defined $data_def )
+        {
+         $data_def =~ s/[\s]+$// ;
+         if( ( $data_def && uc($data_def) ne 'NULL') || $data_def eq '0' )
+           {
+            print $out ' DEFAULT '. $data_def ;
+## -- @@ spec: begin
+##       if( $data_def eq '0' )
+##         { print 'ALTER TABLE '. lc( $table_name ) .' MODIFY ( '. $col_name .' DEFAULT 0 ) ;'."\n" }
+## -- @@ spec: end
+           }
+        }
+
+      if( $null eq 'Y' )
+        { print $out ' NULL' }
+      else
+        { print $out ' NOT NULL' }
+     }
+
+# -- table options
+
+   if( $is_iot ne 'Y' )
+     { print $out "\n)" }
+   else
+     { print_pk_for_iot( $out, $table_name ) }  # -- for index organised table
+
+   if( $is_part eq 'Y' )
+     {
+      print_partition_clause( $out, $table_name ) ;
+     }
+
+   if( $is_temp eq 'Y' )  # -- temporary table
+     {
+      if( $duration =~ /SESSION$/ )
+        { print $out "\n".'ON COMMIT PRESERVE ROWS' }
+      else
+        { print $out "\n".'ON COMMIT DELETE ROWS' }
+     }
+
+   if( $is_log ne 'Y' && $is_temp ne 'Y')  { print $out "\n".'NOLOGGING' }
+
+   print $out "\n".'TABLESPACE &TABSP_NAME'."\n".'/'."\n\n" ;
+
+   ## print $out " ;\n\n" ;
+  }
+
+
+sub upload_tab_check_con  # -- check constraints
+  {
+   my ( $out, $table_name ) = @_ ;
+
+   my ( $con, $text ) ;
+   my $c_con = $Lda->prepare( q{
+select a.CONSTRAINT_NAME, a.SEARCH_CONDITION
+from   USER_CONSTRAINTS a
+where  a.CONSTRAINT_NAME not like 'SYS%'
+       and a.CONSTRAINT_TYPE = 'C'
+       and a.TABLE_NAME = ?
+order by a.CONSTRAINT_NAME
+} ) ;
+
+   $c_con->execute( $table_name ) ;
+
+   while( ( $con, $text ) = $c_con->fetchrow_array() )
+     {
+      $text =~ s/[\t ]+/ /g ;
+      print $out 'ALTER TABLE '. lc( $table_name ) .' ADD'."\n".
+                'CONSTRAINT '. lc( $con ) .' CHECK ('."\n".
+                ' '. $text .' )'."\n".
+                '/'."\n\n" ;
+     }
+  }
+
+
+sub upload_tab_indexes
+  {
+   # $is_iot = 'Y' (index organized table) => vynechava se "primary constraint index"
+   my ( $table_name, $flg_spath, $is_iot ) = @_ ;
+   my ( $pathname, $filename, $file_postfix, $file_desc ) ;
+   my ( $ind_r,  # -- poradove cislo
+        $ind_c,  # -- poradove cislo v ramci jednoho indexu
+        $sum_c,  # -- pocet sloupcu pro index
+        $ind_name, $ind_type, $uniq, $locality, $ctype, $col_name ) ;
+   my ( $table_name2, $ind_name2, $ind_type2, $locality2, $ctype2, $col_names ) ;
+   my ( $ind_option, $out ) ;
+
+   my $c_ind = $Lda->prepare( q{
+select
+  row_number() over (order by a.INDEX_NAME, b.COLUMN_POSITION )             as IND_R,
+  row_number() over (partition by a.INDEX_NAME order by b.COLUMN_POSITION ) as IND_C,
+  count( b.COLUMN_POSITION ) over (partition by a.INDEX_NAME )              as SUM_C,
+  a.INDEX_NAME,
+  a.INDEX_TYPE,
+  a.UNIQUENESS,
+  decode( a.PARTITIONED,'yes', d.LOCALITY ) as LOCALITY,
+  c.CONSTRAINT_TYPE as CTYPE,
+  b.COLUMN_NAME
+from
+  USER_INDEXES a
+  inner join USER_IND_COLUMNS b       on ( a.INDEX_NAME = b.INDEX_NAME )
+  left outer join USER_CONSTRAINTS c  on ( a.INDEX_NAME = c.CONSTRAINT_NAME )
+  left outer join USER_PART_INDEXES d on ( a.INDEX_NAME = d.INDEX_NAME )
+where
+  a.TABLE_NAME = ?
+  and ('Y' != ? or nvl( c.CONSTRAINT_TYPE,'-') != 'P') -- leaves out PK for index organized table
+order by
+  a.INDEX_NAME,
+  b.COLUMN_POSITION
+} ) ;
+
+   $c_ind->execute( $table_name, $is_iot ) ;
+
+   while( ( $ind_r, $ind_c, $sum_c, $ind_name, $ind_type, $uniq, $locality, $ctype, $col_name )
+          = $c_ind->fetchrow_array() )
+     {
+      if( $ind_r == 1 )
+        {
+         $table_name2 = lc( $table_name ) ;
+
+         ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname('ix', $table_name, $flg_spath ) ;
+
+         open( $out,'>'. $pathname ) || die 'Error on open('. $pathname .'): '. $! ."\n\n" ;
+         out_print_head( $out, $filename, $file_postfix, $file_desc ) ;
+
+          # print $out 'PROMPT Indexes on table '. $table_name ."\n" ;
+        }
+
+      if( $ind_c == 1 )  # the first row for the table index
+        {
+         $ind_name2 = lc( $ind_name ) ;
+         $ind_type2 = $ind_type ;
+         $locality2 = $locality ;
+         $col_names = lc( $col_name ) ;
+
+         if( $locality2 )  # -- not null only for partitioned index
+           {
+            if( $locality2 ne 'LOCAL' )
+              {
+               print 'Warning: partitioned index '. $ind_name .
+                     ' with unsuported locality: '. $locality2 ."\n" ;
+               $locality2 = '' ;
+              }
+           }
+
+         unless( $ctype )
+           {
+# pozn.: pro UNIQUE index, pro kt. neexistuje UNIQUE CONSTRAINT,
+# se tento constraint generuje
+            if( $uniq ne 'UNIQUE' )  { $ctype2 = '' }
+            else
+              {
+               $ctype2 = $uniq ;
+               print 'Warning: UNIQUE index '. $ind_name .' on '. $table_name .
+                     ' without according unique constraint exists'."\n" ;
+              }
+           }
+         else
+           {
+            if( $ctype eq 'P' ) { $ctype2 = 'PRIMARY KEY' } else { $ctype2 = 'UNIQUE' }
+           }
+        }
+      else
+        { $col_names .= ', '. lc( $col_name ) }
+
+      if( $ind_c == $sum_c )  # the last row for the table index
+        {
+         if( $ctype2 )
+           {
+            print $out "\n".
+                       'ALTER TABLE '. $table_name2 .' ADD'."\n".
+                       'CONSTRAINT '. $ind_name2 .' '. $ctype2 .' ( '. $col_names .' )' ;
+           }
+         else
+           {
+            if( $ind_type2 ne 'BITMAP')  { $ind_option = '' }
+            else
+              { $ind_option = $ind_type2 .' ' }
+
+            print $out "\n".
+                       'CREATE '. $ind_option .'INDEX '. $ind_name2 .' ON '.
+                       $table_name2 .' ( '. $col_names .' )' ;
+           }
+
+         if( $ctype2 )
+           {
+            if( defined $locality2 && $locality2 eq 'LOCAL' )
+              {
+               print $out "\n".'USING INDEX LOCAL'.
+                          "\n".'TABLESPACE &TABSP_NAME' ;
+              }
+            else
+              {
+               print $out "\n".'USING INDEX'.
+                          "\n".'TABLESPACE &TABSP_NAME' ;
+              }
+           }
+         else
+           {
+            if( defined $locality2 && $locality2 eq 'LOCAL' )
+              {
+               print $out "\n".'LOCAL'.
+                          "\n".'TABLESPACE &TABSP_NAME'.
+                          "\n".'PARALLEL' ;
+              }
+            else
+              { print $out "\n".'TABLESPACE &TABSP_NAME' }
+           }
+
+         print $out "\n/\n" ;
+        }
+     }
+
+   if( $c_ind->rows > 0 )
+     {
+      close( $out ) ; print 'File '. $pathname .' created.'."\n" ;
+     }
+  }
+
+
+sub upload_tables
+  {
+   my ( $table_name_IN, $flg_spath ) = @_ ;
+   my $out_cnt = 0 ;
+   my $out ;
+   my ( $pathname, $filename, $file_postfix, $file_desc ) ;
+   my ( $table_name,
+        $tabsp_name,  # not used
+        $clust_name,  # not used (warning: if not null)
+        $is_log,
+        $is_part,     # partioned table (Y/N)
+        $is_iot,      # index organized table (Y/N)
+        $is_temp,     # temporary table (Y/N)
+        $duration,    # for temp.table; values: 'SYS$SESSION','SYS$TRANSACTION'
+        $index_flg,
+        $trigger_flg ) ;
+   my $c_tab = $Lda->prepare( q{
+with
+X_TABLES
+as
+  ( select
+      a.TABLE_NAME,
+      a.TABLESPACE_NAME,
+      a.CLUSTER_NAME,
+      decode( nvl( a.LOGGING,'YES'),'YES','Y','N') as LOGGING,
+      decode( a.PARTITIONED,'YES','Y','N')         as PARTITIONED,
+      decode( nvl( a.IOT_TYPE,'-'),'IOT','Y','N')  as IOT,
+      a.TEMPORARY,
+      a.DURATION
+    from
+      USER_TABLES a
+      left outer join USER_MVIEW_LOGS m on ( a.TABLE_NAME = m.LOG_TABLE )
+    where
+      regexp_like( a.TABLE_NAME, ?,'i')
+      and m.LOG_TABLE is null
+      and nvl( a.SECONDARY,'n') != 'Y'
+      and a.TABLE_NAME not like 'RUPD$#_%' escape '#'
+  ),
+X_TABLES_WITH_INDEX
+as
+  ( select distinct d.TABLE_NAME
+    from
+      X_TABLES d
+      inner join USER_INDEXES e on ( d.TABLE_NAME = e.TABLE_NAME )
+  ),
+X_TABLES_WITH_TRIGGER
+as
+  ( select distinct b.TABLE_NAME
+    from
+      X_TABLES b
+      inner join USER_TRIGGERS c on ( b.TABLE_NAME = c.TABLE_NAME )
+  )
+select
+  i.TABLE_NAME,
+  i.TABLESPACE_NAME,
+  i.CLUSTER_NAME,
+  i.LOGGING,
+  i.PARTITIONED,
+  i.IOT,
+  i.TEMPORARY,
+  i.DURATION,
+  case when j.TABLE_NAME is not null then 'Y' end as INDEX_FLG,
+  case when k.TABLE_NAME is not null then 'Y' end as TRIGGER_FLG
+from
+  X_TABLES i
+  left outer join X_TABLES_WITH_INDEX j   on ( i.TABLE_NAME = j.TABLE_NAME )
+  left outer join X_TABLES_WITH_TRIGGER k on ( i.TABLE_NAME = k.TABLE_NAME )
+order by
+  i.TABLE_NAME
+} ) ;
+
+   $c_tab->execute( $table_name_IN ) ;
+
+   while( ( $table_name, $tabsp_name, $clust_name, $is_log, $is_part, $is_iot, $is_temp, $duration,
+            $index_flg, $trigger_flg ) = $c_tab->fetchrow_array() )
+     {
+      $out_cnt++ ;
+      ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname('tab', $table_name, $flg_spath ) ;
+
+      open( $out,'>'. $pathname ) || die 'Error on open('. $pathname .'): '. $! ."\n\n" ;
+      out_print_head( $out, $filename, $file_postfix, $file_desc ) ;
+
+      # -- table specification
+      if( $clust_name )
+        { print 'Warning: cluster '. $clust_name .' ignored (table name: '. $table_name .")\n" }
+
+      upload_tab_cols( $out, $table_name, $tabsp_name, $clust_name,
+                       $is_log, $is_part, $is_iot, $is_temp, $duration ) ;
+
+      # -- check constraints
+      upload_tab_check_con( $out, $table_name ) ;
+
+      # -- comments
+      upload_tab_comments( $out, $table_name ) ;
+
+      close( $out ) ; print 'File '. $pathname .' created.'."\n" ;
+
+      # -- indexes (into other file)
+
+      if( $index_flg )   { upload_tab_indexes( $table_name, $flg_spath, $is_iot ) }
+
+      # -- triggers (into other file)
+
+      if( $trigger_flg ) { upload_tab_triggers('trt', $table_name, $flg_spath ) }
+     }
+
+   return $out_cnt ;
+  }
+
 
 # --- End of get_db_obj_ora.pl
