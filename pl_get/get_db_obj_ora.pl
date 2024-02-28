@@ -861,6 +861,118 @@ order by
   }
 
 
+sub print_pk_for_iot
+  {
+   my ( $out, $table_name ) = @_ ;
+   my ( $con_name, $col_name, $col_pos ) ;
+
+   my $c_pk = $Lda->prepare( q{
+select
+  lower( a.CONSTRAINT_NAME ),
+  lower( b.COLUMN_NAME ),
+  b.COLUMN_POSITION
+from
+  USER_CONSTRAINTS a
+  inner join USER_IND_COLUMNS b on ( a.CONSTRAINT_NAME = b.INDEX_NAME )
+where
+  a.TABLE_NAME = ?
+  and a.CONSTRAINT_TYPE = 'P'
+order by
+  b.COLUMN_POSITION
+} ) ;
+
+   $c_pk->execute( $table_name ) ;
+   while( ( $con_name, $col_name, $col_pos ) = $c_pk->fetchrow_array() )
+     {
+      if( $col_pos == 1 )
+        {
+         print $out ",\n".'CONSTRAINT '. $con_name .' PRIMARY KEY('."\n".
+                    '  '. $col_name ;
+        }
+      else
+        { print $out ",\n  ". $col_name }
+     }
+   print $out " )\n".")\n".'ORGANIZATION INDEX' ;
+  }
+
+
+sub print_partitions
+  {
+   my ( $out, $table_name, $part_type ) = @_ ;
+   my ( $part_name, $val ) ;
+   my $keywords ;
+
+   my $c_pa = $Lda->prepare( q{
+select a.PARTITION_NAME, a.HIGH_VALUE
+from   USER_TAB_PARTITIONS a
+where  a.TABLE_NAME = ?
+order by a.PARTITION_POSITION
+} ) ;
+
+   if(    $part_type eq 'LIST' )  { $keywords = 'VALUES' }
+   elsif( $part_type eq 'RANGE')  { $keywords = 'VALUES LESS THAN' }
+   elsif( $part_type eq 'HASH' )  { $keywords = '' }
+   else                           { $keywords = '/* ERROR (part_type='. $part_type .') */' }
+
+   $c_pa->execute( $table_name ) ;
+
+   while( ( $part_name, $val ) = $c_pa->fetchrow_array() )
+     {
+      if( $c_pa->rows > 1 ) { print $out ',' }
+
+      if( $keywords )
+        { print $out "\n".'  PARTITION '. $part_name .' '. $keywords .' ('. $val .')' }
+      else
+        { print $out "\n".'  PARTITION '. $part_name }  # -- for hash partitions
+     }
+  }
+
+
+sub print_partition_clause
+  {
+   my ( $out, $table_name ) = @_ ;
+   my ( $part_type, $subpart_type, $part_cnt, $col_name ) ;
+   my $part_type0 ;
+
+   my $c_pt = $Lda->prepare( q{
+select
+  a.PARTITIONING_TYPE,
+  a.SUBPARTITIONING_TYPE,
+  a.PARTITION_COUNT,
+  lower( b.COLUMN_NAME )
+from
+  USER_PART_TABLES a
+  inner join USER_PART_KEY_COLUMNS b on ( a.TABLE_NAME = b.NAME
+                                          and 'TABLE'  = b.OBJECT_TYPE )
+where
+  a.TABLE_NAME = ?
+order by
+  b.COLUMN_POSITION
+} ) ;
+
+   $c_pt->execute( $table_name ) ;
+   while( ( $part_type, $subpart_type, $part_cnt, $col_name ) = $c_pt->fetchrow_array() )
+     {
+      if( $c_pt->rows == 1 )
+        {
+         if( $subpart_type ne 'NONE' )
+           {
+            print 'Warning: subpartition_type='. $subpart_type .' for table_name='. $table_name ."\n" ;
+           }
+         print $out "\n".'PARTITION BY '. $part_type .' ('. $col_name ;
+         $part_type0 = $part_type ;
+        }
+      else
+        { print $out ', '. $col_name }
+     }
+   print $out ') (' ;
+
+   print_partitions( $out, $table_name, $part_type0 ) ;
+
+   print $out "\n)" ;
+  }
+
+
 sub upload_tables
   {
    my ( $table_name_IN, $flg_spath ) = @_ ;
