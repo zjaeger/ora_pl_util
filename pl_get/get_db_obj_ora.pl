@@ -2,12 +2,12 @@
 #
 # get_db_obj_ora.pl
 #
-# SCHEMA OBJECTS UPLOAD (into text-files):
+# SCHEMA OBJECTS UPLOAD (into text-files)
 #
 # USAGE: get_db_obj_ora.pl <oracle_connect_string> -[<option>...] [ <object_name_REGEXP>|all ] ...
 # (oracle_connect_string: username/password@db_name)
 #
-# 2024-02-27 (last update)
+# 2024-02-28 (last update)
 
 use strict ;
 use warnings ;
@@ -19,16 +19,19 @@ use Ora_LDA ;
 use open ':encoding(UTF-8)'; # input/output default encoding will be UTF-8
 # no warnings 'utf8';
 
-# { <object_type> } => [ <subdir>, <file_postfix>, <file_description> ]
+# { <object_type> } => [ <subdir>, <obj_abbrev>, <file_description> ]
+#                      [ <subdir>, <obj_abbrev> ] - should be unique
 my %h_obj_tp = (
-  'tab' => ['tab','O1T.sql','table'],
-  'ix'  => ['tab','O1I.sql','table indexes'],
-  'trt' => ['tab','O1R.sql','triggers'],
-  'trv' => ['vie','O1R.sql','triggers'],
-  'vie' => ['vie','O1V.sql','view'],
-  'pro' => ['pro','O1P.sql','PL/SQL procedure'],
-  'fce' => ['fce','O1F.sql','PL/SQL function'],
-  'pl'  => ['pl', 'O1L.sql','PL/SQL package']
+  'tab' => ['tab','T','table'],
+  'ix'  => ['tab','I','table indexes'],
+  'con' => ['tab','C','table check and FK constraints'],
+  'trt' => ['tab','R','triggers'],
+  'trv' => ['vie','R','triggers'],
+  'vie' => ['vie','V','view'],
+  'pro' => ['pro','P','PL/SQL procedure'],
+  'fce' => ['fce','F','PL/SQL function'],
+  'pl'  => ['pl', 'L','PL/SQL package'],
+  'seq' => ['oth','S','sequences']
 ) ;
 
 my %h_spath ; # $spath "cache" (optimization only)
@@ -37,7 +40,7 @@ my %h_spath ; # $spath "cache" (optimization only)
 
 $ENV{"NLS_SORT"} = 'BINARY' ;
 
-my ( $Userid, $Flg_ta, $Flg_vw, $Flg_pl, $ra_Names ) = get_input_params( \@ARGV ) ;
+my ( $Userid, $Flg_ta, $Flg_vw, $Flg_pl, $Flg_sq, $ra_Names ) = get_input_params( \@ARGV ) ;
 my $Lda ;
 
 # break flag variable
@@ -59,8 +62,10 @@ if( $Lda = Ora_LDA::ora_LDA( $Userid ))
          if( $Flg_ta ) { $obj_cnt += upload_tables( $obj_name_RE, $Flg_ta ) }
          if( $Flg_vw ) { $obj_cnt += upload_views(  $obj_name_RE, $Flg_vw ) }
          if( $Flg_pl ) { $obj_cnt += upload_plsql(  $obj_name_RE, $Flg_pl ) }
+         if( $Flg_sq ) { upload_sequences( $Flg_sq ) }
 
-         if( $obj_cnt == 0 ) { print STDERR 'Warning: no data found for obj_name_RE = '. $obj_name_RE ."\n" }
+         if( $obj_cnt == 0 && ( $Flg_ta || $Flg_vw || $Flg_pl ))
+           { print STDERR 'Warning: no data found for obj_name_RE = '. $obj_name_RE ."\n" }
 
          if( $break_FLG != 0 ) { last ; }
         }
@@ -82,11 +87,12 @@ sub get_input_params
         $flg_ta, # flag (0, 1, 2, 3): tables
         $flg_vw, # flag (0, 1, 2, 3): views
         $flg_pl, # flag (0, 1, 2, 3): stored code
+        $flg_sq, # flag (0, 1, 2)   : sequences
         @a_name  # view name regexp values
       ) ;
    my @a_val ;
 
-   ( $flg_ta, $flg_vw, $flg_pl ) = ( 0, 0, 0 ) ;
+   ( $flg_ta, $flg_vw, $flg_pl, $flg_sq ) = ( 0, 0, 0, 0 ) ;
    @a_name = () ;
 
    foreach my $val ( @$ra_arg )
@@ -106,6 +112,8 @@ sub get_input_params
             if(    $ch eq 'T' ) { $flg_ta++ }
             elsif( $ch eq 'V' ) { $flg_vw++ }
             elsif( $ch eq 'P' ) { $flg_pl++ }
+            elsif( $ch eq 'S' ) { if( $flg_sq < 2 ) { $flg_sq++ }
+                                }
             elsif( $ch ne '-')  { print 'Warning: '. $ch .' - invalid option.'."\n" }
            }
         }
@@ -117,14 +125,18 @@ sub get_input_params
 
    unless(    defined( $userid )
            && scalar @a_name != 0
-           && ( $flg_ta != 0 || $flg_vw != 0 || $flg_pl != 0 ) )
+           && ( $flg_ta != 0 || $flg_vw != 0 || $flg_pl != 0 || $flg_sq != 0 ) )
      {
       if( scalar @$ra_arg > 0 ) { print STDERR 'Invalid parameters'."\n" }
-      printf STDERR 'Usage: '. basename( $0 ) .' <userid> [-t] [-v] [-p] [<object_name_RE>] ...'."\n\n" ;
+      printf STDERR 'Usage: '. basename( $0 ) .' <userid> [-t] [-v] [-p] [-s] [<object_name_RE>] ...'."\n".
+                    '  -t+ ... tables (+table indexes, triggers, check/Fk constraints)'."\n".
+                    '  -v+ ... views (+view triggers)'."\n".
+                    '  -p+ ... PL/SQL stored code (function, procedure, package)'."\n".
+                    '  -s+ ... sequences'."\n\n" ;
       exit 1 ;
      }
 
-   return ( $userid, $flg_ta, $flg_vw, $flg_pl, \@a_name ) ;
+   return ( $userid, $flg_ta, $flg_vw, $flg_pl, $flg_sq, \@a_name ) ;
   }
 
 
@@ -160,24 +172,24 @@ sub h_spath_check
 sub get_pathname
   {
    my ( $obj_tp, $obj_name, $flg_spath ) = @_ ;
-   my ( $subdir, $postfix, $descr ) ;
+   my ( $subdir, $obj_abbrev, $descr ) ;
    my ( $spath, $pref ) ;
-   my ( $filename, $pathname ) ;
+   my ( $filename, $pathname, $postfix ) ;
 
    if( ! exists $h_obj_tp{ $obj_tp } )
      {
       $pathname = $filename = lc( $obj_name ) .'.sql' ;
-      $descr = '?' ;
       $postfix = '' ;
+      $descr = '?' ;
       print STDERR 'Warning: '. $obj_tp .' - invalid object type.'."\n" ;
      }
    else
      {
-      ( $subdir, $postfix, $descr ) = @{$h_obj_tp{ $obj_tp }} ;
+      ( $subdir, $obj_abbrev, $descr ) = @{$h_obj_tp{ $obj_tp }} ;
 
       if( $flg_spath > 0 )
         {
-         $spath = '' ;
+         $spath = '' ; # sub path
 
          if( $flg_spath > 1 )
            {
@@ -193,7 +205,8 @@ sub get_pathname
               }
            }
         }
-      $filename = lc( $obj_name ) .'_'. $postfix ;
+      $postfix = 'O1'. $obj_abbrev ; # O1: O - Oracle, 1 - core
+      $filename = lc( $obj_name ) .'_'. $postfix .'.sql' ;
       $pathname = $spath . $filename ;
      }
 
@@ -203,10 +216,7 @@ sub get_pathname
 
 sub out_print_head
   {
-   my ( $out, $filename, $file_postfix, $file_desc ) = @_ ;
-   my $postfix ;
-
-   $postfix = substr( $file_postfix, 0, index( $file_postfix,'.')) ;
+   my ( $out, $filename, $postfix, $file_desc ) = @_ ;
 
    print $out '-- '. $filename ."\n".
               '--'."\n".
@@ -582,17 +592,16 @@ order by a.COLUMN_ID
 
    if( $is_log ne 'Y' && $is_temp ne 'Y')  { print $out "\n".'NOLOGGING' }
 
-   print $out "\n".'TABLESPACE &TABSP_NAME'."\n".'/'."\n\n" ;
+   print $out "\n".'TABLESPACE &TABSP_NAME'."\n".';'."\n" ;
 
    ## print $out " ;\n\n" ;
   }
 
 
-sub upload_tab_check_con  # -- check constraints
+sub upload_tab_con_check
   {
    my ( $out, $table_name ) = @_ ;
-
-   my ( $con, $text ) ;
+   my ( $con, $text, $out_cnt ) ;
    my $c_con = $Lda->prepare( q{
 select a.CONSTRAINT_NAME, a.SEARCH_CONDITION
 from   USER_CONSTRAINTS a
@@ -603,77 +612,169 @@ order by a.CONSTRAINT_NAME
 } ) ;
 
    $c_con->execute( $table_name ) ;
-
+   $out_cnt = 0 ;
    while( ( $con, $text ) = $c_con->fetchrow_array() )
      {
+      if( $out_cnt == 0 ) { print $out '-- check constraints'."\n" }
+      $out_cnt++ ;
       $text =~ s/[\t ]+/ /g ;
       print $out 'ALTER TABLE '. lc( $table_name ) .' ADD'."\n".
-                'CONSTRAINT '. lc( $con ) .' CHECK ('."\n".
-                ' '. $text .' )'."\n".
-                '/'."\n\n" ;
+                 'CONSTRAINT '.  lc( $con )        .' CHECK ('."\n".
+                 ' '. $text .' )'."\n".
+                 ';'."\n" ;
      }
+   return $out_cnt ;
+  }
+
+
+sub upload_tab_con_FK
+  {
+   my ( $out, $table_name ) = @_ ;
+   my ( $col_seq, $col_cnt, $fk_name, $col_name, $r_tab_name, $r_col_name ) ;
+   my ( @a_col_FK, @a_col_PK, $out_cnt ) ;
+   my $c_con = $Lda->prepare( q{
+select
+  row_number() over (partition by a.CONSTRAINT_NAME order by b.POSITION ) as COL_SEQ,
+  count( b.POSITION ) over (partition by a.CONSTRAINT_NAME )              as COL_CNT,
+--a.TABLE_NAME,
+  a.CONSTRAINT_NAME,
+--b.POSITION,
+  b.COLUMN_NAME,
+--a.R_CONSTRAINT_NAME,
+  c.TABLE_NAME  as R_TABLE_NAME,
+  c.COLUMN_NAME as R_COLUMN_NAME
+from
+  USER_CONSTRAINTS a
+  inner join USER_CONS_COLUMNS b      on (   a.CONSTRAINT_NAME = b.CONSTRAINT_NAME )
+  left outer join USER_CONS_COLUMNS c on ( a.R_CONSTRAINT_NAME = c.CONSTRAINT_NAME
+                                           and b.POSITION      = c.POSITION )
+where
+  a.CONSTRAINT_TYPE = 'R'
+  and a.TABLE_NAME = ?
+order by
+  a.CONSTRAINT_NAME,
+  b.POSITION
+} ) ;
+
+   $out_cnt = 0 ;
+   $c_con->execute( $table_name ) ;
+   while( ( $col_seq, $col_cnt, $fk_name, $col_name, $r_tab_name, $r_col_name ) = $c_con->fetchrow_array() )
+     {
+      if( $col_seq == 1 ) { @a_col_FK = @a_col_PK = () }
+      push( @a_col_FK, $col_name ) ;
+      push( @a_col_PK, $r_col_name ) ;
+      if( $col_seq == $col_cnt )
+        {
+         if( $out_cnt == 0 ) { print $out '-- foreign key constraints'."\n" }
+         $out_cnt++ ;
+         print $out 'ALTER TABLE '. lc( $table_name ) .' ADD'."\n".
+                    'CONSTRAINT '.  lc( $fk_name )    .' FOREIGN KEY ('. join(', ', @a_col_FK ) .")\n".
+                    'REFERENCES '.  lc( $r_tab_name )             .' ('. join(', ', @a_col_PK ) .")\n".
+                    ';'."\n" ;
+        }
+     }
+
+   return $out_cnt ;
+  }
+
+
+sub upload_tab_constraints  # -- check and FK constraints
+  {
+   my ( $table_name, $flg_spath ) = @_ ;
+   my ( $pathname, $filename, $file_postfix, $file_desc ) ;
+   my $out ;
+
+   ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname('con', $table_name, $flg_spath ) ;
+
+   open( $out,'>'. $pathname ) || die 'Error on open('. $pathname .'): '. $! ."\n\n" ;
+   out_print_head( $out, $filename, $file_postfix, $file_desc ) ;
+
+   upload_tab_con_check( $out, $table_name ) ;
+   upload_tab_con_FK(    $out, $table_name ) ;
+
+   close( $out ) ;
   }
 
 
 sub upload_tab_indexes
   {
-   # $is_iot = 'Y' (index organized table) => vynechava se "primary constraint index"
+   # $is_iot = 'Y' (index organized table) => "primary constraint index" omitted
    my ( $table_name, $flg_spath, $is_iot ) = @_ ;
    my ( $pathname, $filename, $file_postfix, $file_desc ) ;
-   my ( $ind_r,  # -- poradove cislo
-        $ind_c,  # -- poradove cislo v ramci jednoho indexu
-        $sum_c,  # -- pocet sloupcu pro index
-        $ind_name, $ind_type, $uniq, $locality, $ctype, $col_name ) ;
-   my ( $table_name2, $ind_name2, $ind_type2, $locality2, $ctype2, $col_names ) ;
-   my ( $ind_option, $out ) ;
+   my ( $col_seq,  # -- index column sequence number
+        $col_cnt,  # -- index columns count
+        $ind_name, $ind_type, $uniq, $locality, $ctype, $col_name, $col_expr ) ;
+   my ( $table_name2, $ind_name2, $ind_type2, $locality2, $ctype2, @a_col_name, $cols_text ) ;
+   my ( $ind_option, $first_flg, $fbi_flg, $out ) ;
 
    my $c_ind = $Lda->prepare( q{
+with
+X_TAB_INDEXES
+as
+  ( select
+      a.INDEX_NAME,
+      a.INDEX_TYPE,
+      a.UNIQUENESS,
+      decode( a.PARTITIONED,'yes', c.LOCALITY ) as LOCALITY,
+      b.CONSTRAINT_TYPE as CTYPE,
+      case nvl( b.CONSTRAINT_TYPE,'-')
+        when 'P' then 1 -- PK constraint
+        when 'U' then 2 -- UK constraint
+                 else case when a.UNIQUENESS = 'UNIQUE' then 3 else 4 end
+      end as X_PRIO
+    from
+      USER_INDEXES a
+      left outer join USER_CONSTRAINTS b  on ( a.INDEX_NAME = b.CONSTRAINT_NAME )
+      left outer join USER_PART_INDEXES c on ( a.INDEX_NAME = c.INDEX_NAME )
+    where
+      a.TABLE_NAME = ?
+      and ('Y' != ? or nvl( b.CONSTRAINT_TYPE,'-') != 'P') -- leaves out PK for table index organized
+  )
 select
-  row_number() over (order by a.INDEX_NAME, b.COLUMN_POSITION )             as IND_R,
-  row_number() over (partition by a.INDEX_NAME order by b.COLUMN_POSITION ) as IND_C,
-  count( b.COLUMN_POSITION ) over (partition by a.INDEX_NAME )              as SUM_C,
-  a.INDEX_NAME,
-  a.INDEX_TYPE,
-  a.UNIQUENESS,
-  decode( a.PARTITIONED,'yes', d.LOCALITY ) as LOCALITY,
-  c.CONSTRAINT_TYPE as CTYPE,
-  b.COLUMN_NAME
+  row_number() over (partition by d.INDEX_NAME order by e.COLUMN_POSITION ) as COL_SEQ,
+  count( e.COLUMN_POSITION ) over (partition by d.INDEX_NAME )              as COL_CNT,
+  d.INDEX_NAME,
+  d.INDEX_TYPE,
+  d.UNIQUENESS,
+  d.LOCALITY,
+  d.CTYPE,
+  e.COLUMN_NAME,
+  f.COLUMN_EXPRESSION -- LONG (FBI index column expression)
 from
-  USER_INDEXES a
-  inner join USER_IND_COLUMNS b       on ( a.INDEX_NAME = b.INDEX_NAME )
-  left outer join USER_CONSTRAINTS c  on ( a.INDEX_NAME = c.CONSTRAINT_NAME )
-  left outer join USER_PART_INDEXES d on ( a.INDEX_NAME = d.INDEX_NAME )
-where
-  a.TABLE_NAME = ?
-  and ('Y' != ? or nvl( c.CONSTRAINT_TYPE,'-') != 'P') -- leaves out PK for index organized table
+  X_TAB_INDEXES d
+  inner join USER_IND_COLUMNS e          on ( d.INDEX_NAME = e.INDEX_NAME )
+  left outer join USER_IND_EXPRESSIONS f on ( e.INDEX_NAME = f.INDEX_NAME
+                                              and e.COLUMN_POSITION = f.COLUMN_POSITION )
 order by
-  a.INDEX_NAME,
-  b.COLUMN_POSITION
+  d.X_PRIO,
+  d.INDEX_NAME,
+  e.COLUMN_POSITION
 } ) ;
 
+   $first_flg = 1 ;
    $c_ind->execute( $table_name, $is_iot ) ;
 
-   while( ( $ind_r, $ind_c, $sum_c, $ind_name, $ind_type, $uniq, $locality, $ctype, $col_name )
+   while( ( $col_seq, $col_cnt, $ind_name, $ind_type, $uniq, $locality, $ctype, $col_name, $col_expr )
           = $c_ind->fetchrow_array() )
      {
-      if( $ind_r == 1 )
+      if( $first_flg )
         {
+         $first_flg = 0 ;
          $table_name2 = lc( $table_name ) ;
 
          ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname('ix', $table_name, $flg_spath ) ;
 
          open( $out,'>'. $pathname ) || die 'Error on open('. $pathname .'): '. $! ."\n\n" ;
          out_print_head( $out, $filename, $file_postfix, $file_desc ) ;
-
-          # print $out 'PROMPT Indexes on table '. $table_name ."\n" ;
         }
 
-      if( $ind_c == 1 )  # the first row for the table index
+      if( $col_seq == 1 )  # the first row for the table index
         {
+         @a_col_name = () ;
+         $fbi_flg = (( $ind_type =~ /^FUNC/ ) ? 1 : 0 ) ;
          $ind_name2 = lc( $ind_name ) ;
          $ind_type2 = $ind_type ;
          $locality2 = $locality ;
-         $col_names = lc( $col_name ) ;
 
          if( $locality2 )  # -- not null only for partitioned index
            {
@@ -702,16 +803,17 @@ order by
             if( $ctype eq 'P' ) { $ctype2 = 'PRIMARY KEY' } else { $ctype2 = 'UNIQUE' }
            }
         }
-      else
-        { $col_names .= ', '. lc( $col_name ) }
 
-      if( $ind_c == $sum_c )  # the last row for the table index
+      push( @a_col_name, (( $fbi_flg ) ? $col_expr : lc( $col_name )) ) ;
+
+      if( $col_seq == $col_cnt )  # the last row for the table index
         {
+         $cols_text = ( $fbi_flg ) ? " (\n". join(",\n", @a_col_name ) ."\n)"
+                                   : ' ( '.  join(', ',  @a_col_name ) .' )' ;
          if( $ctype2 )
            {
-            print $out "\n".
-                       'ALTER TABLE '. $table_name2 .' ADD'."\n".
-                       'CONSTRAINT '. $ind_name2 .' '. $ctype2 .' ( '. $col_names .' )' ;
+            print $out 'ALTER TABLE '. $table_name2 .' ADD'."\n".
+                       'CONSTRAINT '. $ind_name2 .' '. $ctype2 . $cols_text ;
            }
          else
            {
@@ -719,9 +821,8 @@ order by
             else
               { $ind_option = $ind_type2 .' ' }
 
-            print $out "\n".
-                       'CREATE '. $ind_option .'INDEX '. $ind_name2 .' ON '.
-                       $table_name2 .' ( '. $col_names .' )' ;
+            print $out 'CREATE '. $ind_option .'INDEX '. $ind_name2
+                       .' ON '.   $table_name2 . $cols_text ;
            }
 
          if( $ctype2 )
@@ -749,7 +850,7 @@ order by
               { print $out "\n".'TABLESPACE &TABSP_NAME' }
            }
 
-         print $out "\n/\n" ;
+         print $out "\n;\n" ;
         }
      }
 
@@ -775,6 +876,7 @@ sub upload_tables
         $is_temp,     # temporary table (Y/N)
         $duration,    # for temp.table; values: 'SYS$SESSION','SYS$TRANSACTION'
         $index_flg,
+        $constr_flg,
         $trigger_flg ) ;
    my $c_tab = $Lda->prepare( q{
 with
@@ -791,26 +893,36 @@ as
       a.DURATION
     from
       USER_TABLES a
-      left outer join USER_MVIEW_LOGS m on ( a.TABLE_NAME = m.LOG_TABLE )
+      left outer join USER_MVIEW_LOGS b on ( a.TABLE_NAME = b.LOG_TABLE )
     where
       regexp_like( a.TABLE_NAME, ?,'i')
-      and m.LOG_TABLE is null
+      and b.LOG_TABLE is null
       and nvl( a.SECONDARY,'n') != 'Y'
       and a.TABLE_NAME not like 'RUPD$#_%' escape '#'
   ),
 X_TABLES_WITH_INDEX
 as
-  ( select distinct d.TABLE_NAME
+  ( select distinct c.TABLE_NAME
     from
-      X_TABLES d
-      inner join USER_INDEXES e on ( d.TABLE_NAME = e.TABLE_NAME )
+      X_TABLES c
+      inner join USER_INDEXES d on ( c.TABLE_NAME = d.TABLE_NAME )
+  ),
+X_TABLES_WITH_CONSTRAINTS
+as
+  ( select distinct e.TABLE_NAME
+    from
+      X_TABLES e
+      inner join USER_CONSTRAINTS f on ( e.TABLE_NAME = f.TABLE_NAME )
+    where
+      f.CONSTRAINT_TYPE in ('C','R')
+      and f.CONSTRAINT_NAME not like 'SYS%'
   ),
 X_TABLES_WITH_TRIGGER
 as
-  ( select distinct b.TABLE_NAME
+  ( select distinct g.TABLE_NAME
     from
-      X_TABLES b
-      inner join USER_TRIGGERS c on ( b.TABLE_NAME = c.TABLE_NAME )
+      X_TABLES g
+      inner join USER_TRIGGERS h on ( g.TABLE_NAME = h.TABLE_NAME )
   )
 select
   i.TABLE_NAME,
@@ -822,11 +934,13 @@ select
   i.TEMPORARY,
   i.DURATION,
   case when j.TABLE_NAME is not null then 'Y' end as INDEX_FLG,
-  case when k.TABLE_NAME is not null then 'Y' end as TRIGGER_FLG
+  case when k.TABLE_NAME is not null then 'Y' end as CONSTR_FLG,
+  case when l.TABLE_NAME is not null then 'Y' end as TRIGGER_FLG
 from
   X_TABLES i
-  left outer join X_TABLES_WITH_INDEX j   on ( i.TABLE_NAME = j.TABLE_NAME )
-  left outer join X_TABLES_WITH_TRIGGER k on ( i.TABLE_NAME = k.TABLE_NAME )
+  left outer join X_TABLES_WITH_INDEX j       on ( i.TABLE_NAME = j.TABLE_NAME )
+  left outer join X_TABLES_WITH_CONSTRAINTS k on ( i.TABLE_NAME = k.TABLE_NAME )
+  left outer join X_TABLES_WITH_TRIGGER l     on ( i.TABLE_NAME = l.TABLE_NAME )
 order by
   i.TABLE_NAME
 } ) ;
@@ -834,7 +948,7 @@ order by
    $c_tab->execute( $table_name_IN ) ;
 
    while( ( $table_name, $tabsp_name, $clust_name, $is_log, $is_part, $is_iot, $is_temp, $duration,
-            $index_flg, $trigger_flg ) = $c_tab->fetchrow_array() )
+            $index_flg, $constr_flg, $trigger_flg ) = $c_tab->fetchrow_array() )
      {
       $out_cnt++ ;
       ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname('tab', $table_name, $flg_spath ) ;
@@ -846,27 +960,79 @@ order by
       if( $clust_name )
         { print 'Warning: cluster '. $clust_name .' ignored (table name: '. $table_name .")\n" }
 
+      # -- tab columns
       upload_tab_cols( $out, $table_name, $tabsp_name, $clust_name,
                        $is_log, $is_part, $is_iot, $is_temp, $duration ) ;
-
-      # -- check constraints
-      upload_tab_check_con( $out, $table_name ) ;
-
       # -- comments
       upload_tab_comments( $out, $table_name ) ;
 
       close( $out ) ; print 'File '. $pathname .' created.'."\n" ;
 
       # -- indexes (into other file)
-
       if( $index_flg )   { upload_tab_indexes( $table_name, $flg_spath, $is_iot ) }
 
-      # -- triggers (into other file)
+      # -- constraints check and FK (into other file)
+      if( $constr_flg )  { upload_tab_constraints( $table_name, $flg_spath ) }
 
+      # -- triggers (into other file)
       if( $trigger_flg ) { upload_tab_triggers('trt', $table_name, $flg_spath ) }
      }
 
    return $out_cnt ;
+  }
+
+
+sub upload_sequences
+  {
+   my ( $flg_spath ) = @_ ;
+   my $out_cnt = 0 ;
+   my ( $seq_name, $val_min, $val_max, $incr, $cycle_flg, $order_flg, $cache_size ) ;
+   my ( $pathname, $filename, $file_postfix, $file_desc ) ;
+   my $out ;
+   my $c_seq = $Lda->prepare( q{
+select
+  a.SEQUENCE_NAME,
+  a.MIN_VALUE,
+  a.MAX_VALUE,
+  a.INCREMENT_BY,
+  a.CYCLE_FLAG,
+  a.ORDER_FLAG,
+  a.CACHE_SIZE
+from
+  USER_SEQUENCES a
+where
+  not regexp_like( a.SEQUENCE_NAME,'^MDRS_\w+\$$')
+  and a.SEQUENCE_NAME not like 'SYS%'
+order by
+  a.SEQUENCE_NAME
+} ) ;
+
+   $c_seq->execute() ;
+   while( ( $seq_name, $val_min, $val_max, $incr, $cycle_flg, $order_flg, $cache_size )
+          = $c_seq->fetchrow_array() )
+     {
+      if( $out_cnt == 0 )
+        {
+         ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname('seq','sequences', $flg_spath ) ;
+
+         open( $out,'>'. $pathname ) || die 'Error on open('. $pathname .'): '. $! ."\n\n" ;
+         out_print_head( $out, $filename, $file_postfix, $file_desc ) ;
+        }
+      $out_cnt++ ;
+
+      print $out 'CREATE SEQUENCE '. lc( $seq_name )."\n".
+                 (( $incr    == 1 )     ? '' : 'INCREMENT BY '. $incr ."\n") .
+                 (( $val_min == 1 )     ? '' : 'MINVALUE '.  $val_min ."\n") .
+                 (( $cycle_flg eq 'N' ) ? '' : 'CYCLE'."\n").
+                 (( $order_flg eq 'N' ) ? '' : 'ORDER'."\n").
+                 (( $cache_size == 0 )  ? 'NOCACHE':'CACHE '. $cache_size )."\n".
+                 ";\n" ;
+     }
+
+   if( $out_cnt > 0 )
+     { close( $out ) ; print 'File '. $pathname .' created.'."\n" ; }
+   else
+     { print STDERR 'Warning: any sequence not found.'."\n" }
   }
 
 
