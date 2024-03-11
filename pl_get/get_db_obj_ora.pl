@@ -7,7 +7,9 @@
 # USAGE: get_db_obj_ora.pl <oracle_connect_string> -[<option>...] [ <object_name_REGEXP>|all ] ...
 # (oracle_connect_string: username/password@db_name)
 #
-# 2024-02-28 (last update)
+# 2024-03-11 (last update)
+#
+# TODO: hash partitions (no sys partitions), check constraint - empty row (?), IOT: test
 
 use strict ;
 use warnings ;
@@ -1006,11 +1008,15 @@ as
     from
       USER_TABLES a
       left outer join USER_MVIEW_LOGS b on ( a.TABLE_NAME = b.LOG_TABLE )
+      left outer join USER_MVIEWS m     on ( a.TABLE_NAME = m.MVIEW_NAME )
     where
       regexp_like( a.TABLE_NAME, ?,'i')
-      and b.LOG_TABLE is null
-      and nvl( a.SECONDARY,'n') != 'Y'
+      and b.LOG_TABLE  is null         -- no materialized view log
+      and m.MVIEW_NAME is null         -- no materialized view
+      and nvl( a.SECONDARY,'n') != 'Y' -- f.e.: no spatial index table
       and a.TABLE_NAME not like 'RUPD$#_%' escape '#'
+      -- RUPD$: temporary updatable snapshot log created for Java RepAPI
+      -- https://forums.oracle.com/ords/apexds/post/materialized-view-log-rupd-8730
   ),
 X_TABLES_WITH_INDEX
 as
@@ -1062,6 +1068,8 @@ order by
    while( ( $table_name, $tabsp_name, $clust_name, $is_log, $is_part, $is_iot, $is_temp, $duration,
             $index_flg, $constr_flg, $trigger_flg ) = $c_tab->fetchrow_array() )
      {
+      if( $break_FLG != 0 ) { $c_tab->finish() ; last ; }
+
       $out_cnt++ ;
       ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname('tab', $table_name, $flg_spath ) ;
 
@@ -1123,6 +1131,8 @@ order by
    while( ( $seq_name, $val_min, $val_max, $incr, $cycle_flg, $order_flg, $cache_size )
           = $c_seq->fetchrow_array() )
      {
+      if( $break_FLG != 0 ) { $c_seq->finish() ; last ; }
+
       if( $out_cnt == 0 )
         {
          ( $pathname, $filename, $file_postfix, $file_desc ) = get_pathname('seq','sequences', $flg_spath ) ;
