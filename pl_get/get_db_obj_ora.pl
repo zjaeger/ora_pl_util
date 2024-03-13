@@ -7,9 +7,9 @@
 # USAGE: get_db_obj_ora.pl <oracle_connect_string> -[<option>...] [ <object_name_REGEXP>|all ] ...
 # (oracle_connect_string: username/password@db_name)
 #
-# 2024-03-11 (last update)
+# 2024-03-13 (last update)
 #
-# TODO: hash partitions (no sys partitions), check constraint - empty row (?), IOT: test
+# TODO: IOT: test, materialized views
 
 use strict ;
 use warnings ;
@@ -245,7 +245,7 @@ where  a.TABLE_NAME = ? and a.COMMENTS is not null
    if( $type )
      {
       $text =~ s/\'/\'\'/g ;
-      print $out "\n".'COMMENT ON '. $type .' '. $table_name .' IS'."\n".
+      print $out "\n".'COMMENT ON '. $type .' '. lc( $table_name ).' IS'."\n".
                  "\'". $text ."\'"." ;\n" ;
      }
 
@@ -261,7 +261,7 @@ order by a.COLUMN_NAME
      {
       if( $first_flg ) { $first_flg = 0 ; print $out "\n" ; }
       $text =~ s/\'/\'\'/g ;
-      print $out 'COMMENT ON COLUMN '. $table_name .'.'. $col_name .' IS'."\n".
+      print $out 'COMMENT ON COLUMN '. lc( $table_name ).'.'. lc( $col_name ).' IS'."\n".
                  "\'". $text ."\'"." ;\n" ;
      }
   }
@@ -603,7 +603,7 @@ order by a.COLUMN_ID
 sub upload_tab_con_check
   {
    my ( $out, $table_name ) = @_ ;
-   my ( $con, $text, $out_cnt ) ;
+   my ( $con, $text, $pos_NL, $out_cnt ) ;
    my $c_con = $Lda->prepare( q{
 select a.CONSTRAINT_NAME, a.SEARCH_CONDITION
 from   USER_CONSTRAINTS a
@@ -619,11 +619,19 @@ order by a.CONSTRAINT_NAME
      {
       if( $out_cnt == 0 ) { print $out '-- check constraints'."\n" }
       $out_cnt++ ;
-      $text =~ s/[\t ]+/ /g ;
       print $out 'ALTER TABLE '. lc( $table_name ) .' ADD'."\n".
-                 'CONSTRAINT '.  lc( $con )        .' CHECK ('."\n".
-                 ' '. $text .' )'."\n".
-                 ';'."\n" ;
+                 'CONSTRAINT '.  lc( $con )        .' CHECK (' ;
+
+      $pos_NL = index( $text,"\n") ;
+      if( $pos_NL >= 0 ) { out_text( $out, $text ) }
+      else
+        {
+         # one line constraint text
+         $text =~ s/^[\s]+// ; # ltrim
+         $text =~ s/[\s]+$// ; # rtrim
+         print $out "\n". $text ;
+        }
+      print $out "\n".') ;'."\n" ;
      }
    return $out_cnt ;
   }
@@ -663,8 +671,8 @@ order by
    while( ( $col_seq, $col_cnt, $fk_name, $col_name, $r_tab_name, $r_col_name ) = $c_con->fetchrow_array() )
      {
       if( $col_seq == 1 ) { @a_col_FK = @a_col_PK = () }
-      push( @a_col_FK, $col_name ) ;
-      push( @a_col_PK, $r_col_name ) ;
+      push( @a_col_FK, lc($col_name) ) ;
+      push( @a_col_PK, lc($r_col_name) ) ;
       if( $col_seq == $col_cnt )
         {
          if( $out_cnt == 0 ) { print $out '-- foreign key constraints'."\n" }
@@ -806,12 +814,13 @@ order by
            }
         }
 
-      push( @a_col_name, (( $fbi_flg ) ? $col_expr : lc( $col_name )) ) ;
+      push( @a_col_name, (( $fbi_flg ) ? (( $col_expr ) ? $col_expr : lc( $col_name ) )
+                                       : lc( $col_name )) ) ;
 
       if( $col_seq == $col_cnt )  # the last row for the table index
         {
          $cols_text = ( $fbi_flg ) ? " (\n". join(",\n", @a_col_name ) ."\n)"
-                                   : ' ( '.  join(', ',  @a_col_name ) .' )' ;
+                                   : ' ('.   join(', ',  @a_col_name ) .')' ;
          if( $ctype2 )
            {
             print $out 'ALTER TABLE '. $table_name2 .' ADD'."\n".
@@ -933,8 +942,8 @@ order by a.PARTITION_POSITION
 sub print_partition_clause
   {
    my ( $out, $table_name ) = @_ ;
-   my ( $part_type, $subpart_type, $part_cnt, $col_name ) ;
-   my $part_type0 ;
+  my ( $part_type, $subpart_type, $part_cnt, $col_name ) ;
+   my ( $part_type_1, $part_cnt_1 ) ;
 
    my $c_pt = $Lda->prepare( q{
 select
@@ -962,16 +971,20 @@ order by
             print 'Warning: subpartition_type='. $subpart_type .' for table_name='. $table_name ."\n" ;
            }
          print $out "\n".'PARTITION BY '. $part_type .' ('. $col_name ;
-         $part_type0 = $part_type ;
+         $part_type_1 = $part_type ;
+         $part_cnt_1  = $part_cnt ;
         }
       else
         { print $out ', '. $col_name }
      }
-   print $out ') (' ;
 
-   print_partitions( $out, $table_name, $part_type0 ) ;
-
-   print $out "\n)" ;
+   if( $part_type_1 eq 'HASH') { print $out ")\n".'PARTITIONS '. $part_cnt_1 }
+   else
+     {
+      print $out ') (' ;
+      print_partitions( $out, $table_name, $part_type_1 ) ;
+      print $out "\n)" ;
+     }
   }
 
 
